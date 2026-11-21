@@ -5,6 +5,7 @@ import { supabase, configured } from './supabase.js';
 import { MOTIONS, DAYPARTS, DEFAULT_MIXES, fromRow, configFromRow, playlist, createStage, readability, daypartNow } from './mixes.js';
 import { DEFAULT_CONTENT, contentFromRows, OFFER_KINDS, LOGO_VIDEOS, WEEK } from './content.js';
 import { mountReel } from './reel.js';
+import { invoiceData, invoiceHtml, INVOICE_CSS, welcomeText, welcomeSubject, printInvoice } from './invoice.js';
 import {
   esc, parse, today, nowTime, addDays, addMonths, diffDays, mKey, curMonth, shiftMonth,
   fmtDate, fmtShort, fmtMonth, fmtMonthS, barChart, pairChart, lineChart, dualChart, donut, gauge, heatmap, funnel, toCsv, download,
@@ -20,7 +21,7 @@ const ALL = STAFF_ROLES, MGR = ['owner', 'manager'], OWN = ['owner'];
 const VIEWS = [
   ['overview', 'Dashboard', ALL],
   ['approvals', 'Approvals', OWN],
-  ['me', 'My Work', ALL],
+  ['me', 'My Work', ['manager', 'trainer', 'receptionist']],
   ['clients', 'My Clients', ALL],
   ['members', 'Members', ALL],
   ['attendance', 'Check-ins', ALL],
@@ -35,10 +36,12 @@ const VIEWS = [
   ['team', 'Logins & Access', OWN],
   ['content', 'Website content', MGR],
   ['themes', 'Themes & visuals', MGR],
+  ['recovery', 'Owner recovery', ['manager']],
   ['backup', 'Backup & restore', OWN],
 ];
 const PLANS = { 'Monthly': 1, 'Quarterly': 3, 'Half-yearly': 6, 'Annual': 12 };
-const JOB_TITLES = ['Owner / Admin', 'Manager', 'Trainer', 'Receptionist', 'Housekeeping', 'Other'];
+// Employee records are for employees only; the owner has a separate owner profile.
+const JOB_TITLES = ['Manager', 'Trainer', 'Receptionist', 'Housekeeping', 'Other'];
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const EQ_CATS = ['Cardio', 'Strength machine', 'Free weights', 'Functional', 'Other'];
 const EQ_STATES = ['Working', 'Under repair', 'Out of order'];
@@ -52,9 +55,9 @@ const FIELD_LABELS = { name: 'Name', phone: 'Phone', email: 'Email', height_cm: 
 // form key -> db column. Personal fields need the owner's approval when changed by anyone else.
 const PERSONAL = { name: 'name', phone: 'phone', email: 'email', heightCm: 'height_cm', goal: 'goal', source: 'source', referredBy: 'referred_by', joinDate: 'join_date', notes: 'notes', broughtBy: 'brought_by' };
 const DIRECT = { weightKg: 'weight_kg', trainerId: 'trainer_id', plan: 'plan', fee: 'fee', expiryDate: 'expiry_date', frozen: 'frozen', offer: 'offer' };
-const DEFAULT_SETTINGS = { gymName: BRAND, currency: '₹', memberPrefix: 'JFS', employeePrefix: 'JFS-E', registrationFee: 500, paidLeaves: 2, offerWindow: 30, reminder: 'Hi {name}, your {plan} membership at {gym} {when} on {date}. Renew at the front desk to keep training without a break!' };
+const DEFAULT_SETTINGS = { gymName: BRAND, currency: '₹', memberPrefix: 'JFS-M', employeePrefix: 'JFS-E', ownerPrefix: 'JFS-O', registrationFee: 500, paidLeaves: 2, offerWindow: 30, reminder: 'Hi {name}, your {plan} membership at {gym} {when} on {date}. Renew at the front desk to keep training without a break!' };
 
-const S = { members: {}, attendance: {}, staff: {}, pay: {}, staffAtt: [], staffTargets: [], payroll: [], targets: {}, equipment: {}, offers: [], memberOffers: [], enquiries: [], expenses: [], requests: [], invitations: [], profiles: [], themes: [], themeCfg: null, content: contentFromRows([]), settings: { ...DEFAULT_SETTINGS } };
+const S = { members: {}, attendance: {}, staff: {}, pay: {}, staffAtt: [], staffTargets: [], payroll: [], targets: {}, equipment: {}, offers: [], memberOffers: [], enquiries: [], expenses: [], requests: [], invitations: [], profiles: [], themes: [], themeCfg: null, content: contentFromRows([]), recovery: { set: false }, recoveryLog: [], settings: { ...DEFAULT_SETTINGS } };
 const ui = { mixPreview: null, enqSource: 'all', restore: null, as: '', meMonth: null, clientSeg: 'all', enqFilter: 'open', memberId: null, history: null, historyFor: null, q: '', memberFilter: 'all', attDate: null, attQ: '', renewSeg: 'due7', payMonth: null, finMonth: null, tMonth: null, staffMonth: null, eqFilter: 'all', staffView: null };
 let session = null, me = null, view = 'overview', loading = true, recovery = false;
 
@@ -102,6 +105,7 @@ const memberHay = m => [m.code, m.name, m.phone, m.email, m.plan, staffName(m.tr
 function memberState(m) {
   const left = m.expiryDate ? diffDays(m.expiryDate, today()) : -9999;
   if (m.frozen) return { key: 'frozen', label: 'Frozen', cls: 'neutral', left };
+  if (!m.expiryDate) return { key: 'new', label: 'No plan yet', cls: 'neutral', left };
   if (left < 0) return { key: 'expired', label: `Expired ${-left}d ago`, cls: 'bad', left };
   if (left <= 7) return { key: 'due', label: left === 0 ? 'Expires today' : `${left}d left`, cls: 'warn', left };
   if (left <= 30) return { key: 'soon', label: `${left}d left`, cls: 'neutral', left };
@@ -184,6 +188,7 @@ function payrollFor(staffId, month) {
    ====================================================================== */
 function friendly(error) {
   const msg = (error && (error.message || error.error_description)) || String(error);
+  if (/OWNER_NOT_EMPLOYEE/.test(msg)) return 'The owner has a separate owner profile and can’t be linked to an employee record.';
   if (/OWNER_APPROVAL_REQUIRED/.test(msg)) return 'Personal details need the owner’s approval. Your change was not saved.';
   if (/row-level security|permission denied/i.test(msg)) return 'Your login doesn’t have permission for this. Ask the owner if you need access.';
   if (/Failed to fetch|NetworkError/i.test(msg)) return 'Could not reach the server. Check your internet connection and try again.';
@@ -194,7 +199,7 @@ async function q(promise) { const { data, error } = await promise; if (error) th
 
 async function loadAll() {
   const since = addDays(today(), -400);
-  const [mem, pay, att, eq, logs, tg, st, staff, spay, satt, stg, prl, offers, moff, enq, exp, req, inv, prof, themes, tcfg, content] = await Promise.all([
+  const [mem, pay, att, eq, logs, tg, st, staff, spay, satt, stg, prl, offers, moff, enq, exp, req, inv, prof, themes, tcfg, content, recStatus, recLog] = await Promise.all([
     q(supabase.from('members').select('*')),
     q(supabase.from('payments').select('*')),
     q(supabase.from('attendance').select('id,member_id,visit_date,visit_time').gte('visit_date', since).limit(100000)),
@@ -217,10 +222,12 @@ async function loadAll() {
     q(supabase.from('site_themes').select('*').order('sort')).catch(() => []),
     q(supabase.from('site_theme_config').select('*').eq('id', 1).maybeSingle()).catch(() => null),
     q(supabase.from('site_content').select('key,value')).catch(() => []),
+    q(supabase.rpc('recovery_status')).catch(() => null),
+    isOwner() ? q(supabase.from('recovery_log').select('*').order('at', { ascending: false }).limit(30)).catch(() => []) : [],
   ]);
   const M = {};
   for (const m of mem) M[m.id] = { code: m.member_code || '', name: m.name, phone: m.phone, email: m.email, heightCm: m.height_cm, weightKg: m.weight_kg, goal: m.goal, source: m.source, referredBy: m.referred_by, offer: m.offer, plan: m.plan, fee: Number(m.fee), joinDate: m.join_date, expiryDate: m.expiry_date, trainerId: m.trainer_id, broughtBy: m.brought_by, frozen: m.frozen, notes: m.notes, createdAt: m.created_at, payments: [] };
-  for (const p of pay) if (M[p.member_id]) M[p.member_id].payments.push({ id: p.id, date: p.paid_on, amount: Number(p.amount), type: p.type, plan: p.plan, offer: p.offer, mode: p.mode, by: p.created_by });
+  for (const p of pay) if (M[p.member_id]) M[p.member_id].payments.push({ id: p.id, date: p.paid_on, amount: Number(p.amount), type: p.type, plan: p.plan, offer: p.offer, mode: p.mode, by: p.created_by, inv: p.invoice_no, at: p.created_at });
   const A = {};
   for (const a of att) (A[a.visit_date] ||= { checkins: [] }).checkins.push({ rowId: a.id, id: a.member_id, name: M[a.member_id]?.name || 'Former member', time: String(a.visit_time).slice(0, 5) });
   const E = {};
@@ -229,8 +236,8 @@ async function loadAll() {
   const T = {}; for (const t of tg) T[t.month] = { revenue: t.revenue, newMembers: t.new_members, renewals: t.renewals, checkins: t.checkins };
   const SF = {}; for (const s of staff) SF[s.id] = { code: s.employee_code || '', name: s.name, title: s.role, phone: s.phone, email: s.email, joinDate: s.join_date, shift: s.shift, weeklyOff: s.weekly_off, active: s.active, notes: s.notes, profileId: s.profile_id };
   const P = {}; for (const p of spay) P[p.staff_id] = Number(p.monthly_salary);
-  Object.assign(S, { members: M, attendance: A, equipment: E, targets: T, staff: SF, pay: P, staffAtt: satt, staffTargets: stg, payroll: prl, offers, memberOffers: moff, enquiries: enq, expenses: exp, requests: req, invitations: inv, profiles: prof, themes: (themes || []).map(fromRow), themeCfg: configFromRow(tcfg), content: contentFromRows(content) });
-  if (st) S.settings = { gymName: st.gym_name, currency: st.currency, memberPrefix: st.member_prefix, employeePrefix: st.employee_prefix, registrationFee: Number(st.registration_fee), paidLeaves: Number(st.paid_leaves_per_month), offerWindow: Number(st.renewal_offer_window_days), reminder: st.reminder };
+  Object.assign(S, { members: M, attendance: A, equipment: E, targets: T, staff: SF, pay: P, staffAtt: satt, staffTargets: stg, payroll: prl, offers, memberOffers: moff, enquiries: enq, expenses: exp, requests: req, invitations: inv, profiles: prof, themes: (themes || []).map(fromRow), themeCfg: configFromRow(tcfg), content: contentFromRows(content), recovery: recStatus || { set: false }, recoveryLog: recLog || [] });
+  if (st) S.settings = { gymName: st.gym_name, currency: st.currency, memberPrefix: st.member_prefix, employeePrefix: st.employee_prefix, ownerPrefix: st.owner_prefix || 'JFS-O', registrationFee: Number(st.registration_fee), paidLeaves: Number(st.paid_leaves_per_month), offerWindow: Number(st.renewal_offer_window_days), reminder: st.reminder };
   if (view === 'member' && ui.memberId) await loadHistory(ui.memberId);
   loading = false; render();
 }
@@ -284,8 +291,8 @@ const pendingApprovals = () => S.requests.filter(r => r.status === 'pending').le
    ====================================================================== */
 const COL = { active: 'var(--good)', due: 'var(--warn)', soon: 'var(--accent)', expired: 'var(--bad)', frozen: 'var(--bar2)' };
 function memberDonut(pool = members(), sub = 'members') {
-  const c = { active: 0, soon: 0, due: 0, expired: 0, frozen: 0 }; for (const m of pool) c[memberState(m).key] = (c[memberState(m).key] || 0) + 1;
-  return donut([{ label: 'Active', v: c.active, color: COL.active }, { label: 'Renew in 8–30 days', v: c.soon, color: COL.soon }, { label: 'Renew within 7 days', v: c.due, color: COL.due }, { label: 'Expired', v: c.expired, color: COL.expired }, { label: 'Frozen', v: c.frozen, color: COL.frozen }], { center: pool.length, sub });
+  const c = { active: 0, soon: 0, due: 0, expired: 0, frozen: 0, new: 0 }; for (const m of pool) c[memberState(m).key] = (c[memberState(m).key] || 0) + 1;
+  return donut([{ label: 'Active', v: c.active, color: COL.active }, { label: 'Renew in 8–30 days', v: c.soon, color: COL.soon }, { label: 'Renew within 7 days', v: c.due, color: COL.due }, { label: 'Expired', v: c.expired, color: COL.expired }, { label: 'Frozen', v: c.frozen, color: COL.frozen }, ...(c.new ? [{ label: 'Signed up online, no plan yet', v: c.new, color: 'var(--muted)' }] : [])], { center: pool.length, sub });
 }
 function targetGauges(month = curMonth()) {
   const a = achieved(month), t = S.targets[month] || {};
@@ -560,7 +567,7 @@ function vMember() {
     </div>
     <div class="grid2">
       <section class="panel"><div class="panel-head"><h2>Weight progress</h2><span class="meta">${wpts.length} record${wpts.length === 1 ? '' : 's'}</span></div>${wpts.length > 1 ? lineChart(wpts) : `<div class="empty">${wpts.length ? 'One weight recorded so far. Update it in Edit at each check-up to see progress.' : 'No weight recorded yet.'}</div>`}</section>
-      <section class="panel"><h2>Payments</h2>${m.payments.length ? `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Offer</th><th class="num">Amount</th></tr></thead><tbody>${m.payments.slice().sort((a, x) => x.date.localeCompare(a.date)).map(p => `<tr><td>${esc(fmtDate(p.date))}<div class="meta">${esc(p.mode || '')}</div></td><td>${p.type === 'registration' ? 'Registration fee' : p.type === 'new' ? 'Joining · ' + esc(p.plan || '') : 'Renewal · ' + esc(p.plan || '')}</td><td>${esc(p.offer || '—')}</td><td class="num">${esc(money(p.amount))}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No payments recorded.</div>'}</section>
+      <section class="panel"><h2>Payments</h2>${m.payments.length ? `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Offer</th><th class="num">Amount</th><th>Invoice</th></tr></thead><tbody>${m.payments.slice().sort((a, x) => x.date.localeCompare(a.date) || String(x.inv || '').localeCompare(String(a.inv || ''))).map(p => `<tr><td>${esc(fmtDate(p.date))}<div class="meta">${esc(p.mode || '')}</div></td><td>${p.type === 'registration' ? 'Registration fee' : p.type === 'new' ? 'Joining · ' + esc(p.plan || '') : 'Renewal · ' + esc(p.plan || '')}</td><td>${esc(p.offer || '—')}</td><td class="num">${esc(money(p.amount))}</td><td>${p.inv ? `<button class="btn sm" data-act="invoice" data-id="${m.id}" data-inv="${esc(p.inv)}">${esc(p.inv)}</button>` : '—'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No payments recorded.</div>'}</section>
     </div>
     <section class="panel"><div class="panel-head"><h2>Change history</h2><span class="meta">every edit, with who made it</span></div>
       ${hist === null ? '<div class="empty">Loading history…</div>' : hist.length ? `<div class="timeline">${hist.map(h => { const ch = Object.entries(h.changes || {}); const when = new Date(h.changed_at);
@@ -731,8 +738,9 @@ function vTeam() {
   const staffList = list('staff').sort((a, b) => a.code.localeCompare(b.code)); const linkedTo = pid => staffList.find(s => s.profileId === pid);
   const inv = S.invitations.filter(i => i.status === 'pending');
   const roleSel = (p, attr) => `<select class="field-inline" ${attr} aria-label="Role">${['pending', ...STAFF_ROLES].map(r => `<option value="${r}" ${p.role === r ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}</select>`;
-  const empSel = p => { const ln = linkedTo(p.id); return `<select class="field-inline" data-act-change="linkStaff" data-id="${p.id}" aria-label="Employee record"><option value="">Not linked</option>${staffList.map(s => `<option value="${s.id}" ${ln && ln.id === s.id ? 'selected' : ''} ${s.profileId && s.profileId !== p.id ? 'disabled' : ''}>${esc(s.code)} · ${esc(s.name)}</option>`).join('')}</select>`; };
+  const empSel = p => { if (p.role === 'owner') return `<span class="chip neutral">Owner profile${p.owner_code ? ' · ' + esc(p.owner_code) : ''}</span>`; const ln = linkedTo(p.id); return `<select class="field-inline" data-act-change="linkStaff" data-id="${p.id}" aria-label="Employee record"><option value="">Not linked</option>${staffList.map(s => `<option value="${s.id}" ${ln && ln.id === s.id ? 'selected' : ''} ${s.profileId && s.profileId !== p.id ? 'disabled' : ''}>${esc(s.code)} · ${esc(s.name)}</option>`).join('')}</select>`; };
   return header('Logins & Access', 'Invite people, choose their role and how long their access lasts.', `<button class="btn" data-act="inviteMember">Invite member</button><button class="btn primary" data-act="inviteStaff">Invite team member</button>`)
+    + recoveryPanel()
     + `<div class="kpis">${kpi('Team logins', active.length, 'Owner/Admin, Manager, Trainer, Receptionist')}${kpi('Waiting for approval', pending.length, 'signed up themselves', { alert: pending.length > 0 })}${kpi('Invitations sent', inv.length, 'not accepted yet')}${kpi('Member logins', memberLogins.filter(p => p.role === 'member').length, 'using the Member portal')}</div>
     ${pending.length ? `<section class="panel"><h2>Waiting for approval</h2><div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Signed up</th><th>Give role</th></tr></thead><tbody>${pending.map(p => `<tr><td class="who">${esc(p.full_name || '')}</td><td>${esc(p.email)}</td><td>${esc(fmtDate(String(p.created_at).slice(0, 10)))}</td><td>${roleSel(p, `data-act-change="setRole" data-id="${p.id}"`)}</td></tr>`).join('')}</tbody></table></div><div class="meta">Approving a self sign-up gives access with no end date. Set an end date afterwards, or use <b>Invite team member</b> to choose the period up front.</div></section>` : ''}
     <section class="panel"><h2>Team logins</h2><div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Role & dashboard</th><th>Employee record</th><th>Access until</th><th></th></tr></thead><tbody>
@@ -924,6 +932,80 @@ function svcForm(i) {
 }
 
 
+
+/* ======================================================================
+   Invoices & welcome note (members)
+   ====================================================================== */
+let invCssAdded = false;
+function invoiceModal(memberId, invNo, welcome = false) {
+  const m = S.members[memberId]; if (!m) return;
+  const groups = [...new Set(m.payments.filter(p => p.inv).map(p => p.inv))];
+  const no = invNo || groups.sort().pop(); if (!no) return;
+  if (!invCssAdded) { const st = document.createElement('style'); st.textContent = INVOICE_CSS + '.inv-preview{max-height:52vh;overflow:auto;border-radius:12px;border:1px solid var(--line)}.inv-preview .inv{padding:22px}.inv-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}'; document.head.appendChild(st); invCssAdded = true; }
+  const rows = m.payments.filter(p => p.inv === no).map(p => ({ invoice_no: p.inv, paid_on: p.date, amount: p.amount, type: p.type, plan: p.plan, offer: p.offer, mode: p.mode }));
+  const inv = invoiceData({ code: m.code, name: m.name, phone: m.phone, email: m.email, plan: m.plan, joinDate: m.joinDate, expiryDate: m.expiryDate }, rows, { portal: WEBSITE_URL + '/member' });
+  ui.inv = inv;
+  const text = welcomeText(inv); const wa = waLink(m.phone, text);
+  const mail = m.email ? `mailto:${encodeURIComponent(m.email)}?subject=${encodeURIComponent(welcomeSubject(inv))}&body=${encodeURIComponent(text)}` : '';
+  openModal(welcome ? (inv.isNew ? `Welcome ${m.name.split(' ')[0]} · send the invoice` : `Renewal saved · send the invoice`) : `Invoice ${no}`,
+    `${welcome ? `<div class="meta">Send ${esc(m.name.split(' ')[0])} a welcome note with their subscription summary. It works as their invoice.</div>` : ''}
+    <div class="inv-preview">${invoiceHtml(inv)}</div>
+    <div class="inv-actions">${mail ? `<a class="btn primary" href="${mail}">Email to ${esc(m.email)}</a>` : '<span class="meta">No email on file. Add one to email the invoice.</span>'}${wa ? `<a class="btn" href="${wa}" target="_blank" rel="noopener">WhatsApp</a>` : ''}<button class="btn" type="button" data-act="invPrint">Print / Save as PDF</button><button class="btn" type="button" data-act="invCopy">Copy message</button></div>`);
+}
+
+/* ======================================================================
+   Owner recovery PIN
+   ====================================================================== */
+function recoveryPanel() {
+  const r = S.recovery || {}; const log = S.recoveryLog.slice(0, 5);
+  const act = { pin_set: 'PIN set', pin_check: 'PIN check', reset_link: 'Reset link sent', set_login: 'Login changed' };
+  return `<section class="panel"><div class="panel-head"><h2>Owner recovery PIN</h2><button class="btn sm ${r.set ? '' : 'primary'}" data-act="setPin">${r.set ? 'Change PIN' : 'Set PIN'}</button></div>
+    <p class="meta" style="margin:0 0 10px">If you lose your password or can’t use your email, a Manager can restore your login with this PIN: send you a reset link, or set a new email and password. Five wrong tries lock it for 30 minutes. Share the PIN only with a Manager you trust.</p>
+    <div>${r.set ? `<span class="chip good">PIN set${r.set_at ? ' on ' + esc(fmtDate(String(r.set_at).slice(0, 10))) : ''}</span>` : '<span class="chip warn">No PIN yet</span>'}${r.locked_until && r.locked_until > new Date().toISOString() ? ' <span class="chip bad">Locked after wrong tries</span>' : ''}</div>
+    ${log.length ? `<div class="tbl-wrap" style="margin-top:10px"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th>Result</th></tr></thead><tbody>${log.map(x => `<tr><td>${esc(new Date(x.at).toLocaleString())}</td><td>${esc(x.manager_name || '')}</td><td>${esc(act[x.action] || x.action)}</td><td><span class="chip ${x.ok ? 'good' : 'bad'}">${x.ok ? 'OK' : 'Failed'}</span> <span class="meta">${esc(x.detail || '')}</span></td></tr>`).join('')}</tbody></table></div>` : ''}</section>`;
+}
+function pinForm() {
+  openModal(S.recovery && S.recovery.set ? 'Change recovery PIN' : 'Set recovery PIN', fieldsHtml([{ k: 'pin', label: 'New PIN (6 to 8 digits)', type: 'password', req: true }, { k: 'pin2', label: 'Type the PIN again', type: 'password', req: true }]) + '<div class="meta">Avoid easy PINs like 123456 or your birthday. The PIN is stored scrambled; nobody can read it back, including you.</div>', {
+    submitLabel: 'Save PIN',
+    submit: async v => {
+      if (!/^\d{6,8}$/.test(v.pin || '')) return toast('Use 6 to 8 digits.');
+      if (v.pin !== v.pin2) return toast('The two PINs don’t match.');
+      if (/^(\d)\1+$/.test(v.pin) || '0123456789'.includes(v.pin) || '9876543210'.includes(v.pin)) return toast('That PIN is too easy to guess. Choose another.');
+      const { data, error } = await supabase.rpc('set_recovery_pin', { p_pin: v.pin });
+      if (error || !data || !data.ok) return toast(error ? friendly(error) : 'Only the owner can set the PIN.');
+      toast('Recovery PIN saved'); await loadAll();
+    },
+  });
+}
+function vRecovery() {
+  const r = S.recovery || {};
+  return header('Owner recovery', 'Use this only when the owner has lost their password or can’t use their email, and has given you the recovery PIN.')
+    + (!r.set ? '<section class="panel"><div class="empty">The owner hasn’t set a recovery PIN yet. They can set one in Logins &amp; Access.</div></section>'
+    : `<section class="panel" style="max-width:640px"><form id="recoveryForm" class="form" autocomplete="off">
+      <label for="r_pin">Owner’s recovery PIN<input id="r_pin" name="pin" type="password" inputmode="numeric" required autocomplete="off"></label>
+      <div class="full"><label class="radio"><input type="radio" name="action" value="reset_link" checked> Send a password reset link to the owner’s email</label>
+        <label class="radio"><input type="radio" name="action" value="set_login"> Set a new email and password for the owner now</label></div>
+      <label for="r_email">New owner email (optional)<input id="r_email" name="new_email" type="email" autocomplete="off"><span class="hint">Only for “set a new email and password”. Leave empty to keep the current email.</span></label>
+      <label for="r_pw">New owner password<input id="r_pw" name="new_password" type="password" minlength="10" autocomplete="new-password"><span class="hint">At least 10 characters. Give it to the owner in person; they should change it after signing in.</span></label>
+      <div class="full" id="recoveryMsg"></div>
+      <button class="btn primary full" type="submit">Restore the owner’s access</button></form>
+      <p class="meta">Every attempt is recorded and shown to the owner, with your name.</p></section>`);
+}
+async function runRecovery(form) {
+  const v = formValues(form); const msg = $('#recoveryMsg'); const btn = form.querySelector('[type=submit]');
+  const say = (cls, t) => { msg.innerHTML = `<div class="${cls}">${t}</div>`; };
+  if (v.action === 'set_login' && (v.new_password || '').length < 10) return say('err', 'The new password needs at least 10 characters.');
+  btn.disabled = true;
+  try {
+    const { data, error } = await supabase.functions.invoke('owner-recovery', { body: { pin: v.pin, action: v.action, new_email: v.new_email || '', new_password: v.new_password || '', redirect_to: location.origin + '/' } });
+    if (error) throw error;
+    const reasons = { wrong_pin: `Wrong PIN. ${data.tries_left ?? ''} tries left before it locks.`, locked: 'Too many wrong tries. The PIN is locked for 30 minutes.', no_pin: 'The owner hasn’t set a PIN.', not_manager: 'Only a Manager can use owner recovery.', weak_password: 'The new password needs at least 10 characters.', bad_email: 'That email address doesn’t look right.', email_taken: 'That email is already used by another login.', send_failed: 'The reset email couldn’t be sent. Try “set a new email and password” instead.' };
+    if (!data || !data.ok) return say('err', reasons[data && data.reason] || 'That didn’t work. Try again.');
+    form.reset();
+    say('ok', v.action === 'reset_link' ? `Done. A password reset link was sent to ${esc(data.sent_to || 'the owner’s email')}.` : `Done. The owner can now sign in${data.email_changed ? ' with the new email' : ''} and the new password.`);
+  } catch (e) { say('err', friendly(e)); } finally { btn.disabled = false; }
+}
+
 /* ======================================================================
    OWNER: backup & restore (Excel)
    ====================================================================== */
@@ -1004,7 +1086,7 @@ async function restoreRun() {
   r.result = data.inserted; toast('Restore finished'); await loadAll();
 }
 
-const VIEW_FN = { content: vContent, themes: vThemes, backup: vBackup, overview: vOverview, approvals: vApprovals, me: vMe, clients: vClients, member: vMember, members: vMembers, attendance: vAttendance, renewals: vRenewals, enquiries: vEnquiries, offers: vOffers, finance: vFinance, payroll: vPayroll, staff: vStaff, targets: vTargets, equipment: vEquipment, team: vTeam };
+const VIEW_FN = { recovery: vRecovery, content: vContent, themes: vThemes, backup: vBackup, overview: vOverview, approvals: vApprovals, me: vMe, clients: vClients, member: vMember, members: vMembers, attendance: vAttendance, renewals: vRenewals, enquiries: vEnquiries, offers: vOffers, finance: vFinance, payroll: vPayroll, staff: vStaff, targets: vTargets, equipment: vEquipment, team: vTeam };
 
 /* ======================================================================
    App shell & auth screens
@@ -1021,7 +1103,8 @@ function renderApp() {
   const main = $('#main'); const a = document.activeElement; const fid = a && a.id && main.contains(a) ? a.id : null; let ss = null;
   try { ss = fid ? a.selectionStart : null; } catch (e) { /* ignore */ }
   const needPw = session.user.user_metadata && session.user.user_metadata.invited_role && !session.user.user_metadata.password_set;
-  main.innerHTML = (needPw ? `<div class="banner" style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap"><span>You signed in with an email link. Set a password so you can sign in normally next time.</span><button class="btn sm primary" data-act="setPassword">Set password</button></div>` : '') + (loading ? '<div class="empty">Loading your gym records…</div>' : VIEW_FN[view]());
+  const recent = isOwner() ? S.recoveryLog.find(r => r.ok && ['set_login', 'reset_link'].includes(r.action) && diffDays(today(), String(r.at).slice(0, 10)) <= 14) : null;
+  main.innerHTML = (recent ? `<div class="banner warn">On ${esc(fmtDate(String(recent.at).slice(0, 10)))}, ${esc(recent.manager_name || 'a manager')} used your recovery PIN (${recent.action === 'set_login' ? 'changed your login' : 'sent a password reset link'}). If you didn’t ask for this, change your PIN in <a href="#team">Logins &amp; Access</a>.</div>` : '') + (needPw ? `<div class="banner" style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap"><span>You signed in with an email link. Set a password so you can sign in normally next time.</span><button class="btn sm primary" data-act="setPassword">Set password</button></div>` : '') + (loading ? '<div class="empty">Loading your gym records…</div>' : VIEW_FN[view]());
   const rb = renewalBuckets();
   const badges = { renewals: rb.due7.length, equipment: list('equipment').filter(e => eqState(e).cls === 'bad').length, enquiries: S.enquiries.filter(e => e.status === 'New').length, approvals: isOwner() ? pendingApprovals() : 0, team: S.profiles.filter(p => p.role === 'pending' && p.portal !== 'member').length };
   $('#nav').innerHTML = VIEWS.filter(([k]) => allowed(k)).map(([k, l]) => `<a href="#${k}" ${k === view || (view === 'member' && k === 'members') ? 'aria-current="page"' : ''}><span>${l}</span>${badges[k] ? `<span class="count">${badges[k]}</span>` : ''}</a>`).join('')
@@ -1029,7 +1112,7 @@ function renderApp() {
   mountThemeStage(); applyDashTheme();
   document.body.classList.remove('authpage');
   $('#meName').textContent = me.full_name || me.email;
-  const st = myStaff(); $('#meRole').innerHTML = `${esc(ROLE_LABEL[myRole()] || '')}${st ? ` · <span class="empcode">${esc(st.code)}</span>` : ''}`;
+  const st = isOwner() ? null : myStaff(); const myCode = isOwner() ? me.owner_code : st && st.code; $('#meRole').innerHTML = `${esc(ROLE_LABEL[myRole()] || '')}${myCode ? ` · <span class="empcode">${esc(myCode)}</span>` : ''}`;
   document.title = 'Employee Dashboard · ' + (S.settings.gymName || BRAND);
   if (fid) { const el = document.getElementById(fid); if (el) { el.focus(); try { if (ss !== null) el.setSelectionRange(ss, ss); } catch (e) { /* ignore */ } } }
 }
@@ -1129,7 +1212,7 @@ function fieldsHtml(fields, v = {}) {
     return `<label class="${cls}" for="${id}">${esc(f.label)}${f.req ? ' *' : ''}${inp}${f.hint ? `<span class="hint">${esc(f.hint)}</span>` : ''}</label>`;
   }).join('')}</div>`;
 }
-function formValues(form) { const o = {}; for (const el of form.elements) { if (!el.name) continue; o[el.name] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? (el.value === '' ? '' : Number(el.value)) : el.value.trim(); } return o; }
+function formValues(form) { const o = {}; for (const el of form.elements) { if (!el.name || (el.type === 'radio' && !el.checked)) continue; o[el.name] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? (el.value === '' ? '' : Number(el.value)) : el.value.trim(); } return o; }
 const trainerOptions = () => list('staff').filter(s => s.active !== false && /trainer|owner|manager/i.test(s.title)).sort((a, b) => a.name.localeCompare(b.name)).map(s => [s.id, `${s.name} (${s.title})`]);
 const staffLoginOptions = (current) => {
   const opts = [[me.id, `Me (${me.full_name || 'owner'})`], ...list('staff').filter(s => s.profileId && s.profileId !== me.id).map(s => [s.profileId, `${s.name} (${s.code})`])];
@@ -1169,7 +1252,7 @@ function memberForm(id, prefill = null, enquiryId = null) {
           await q(supabase.from('payments').insert(pays));
           if (enquiryId) await q(supabase.from('enquiries').update({ status: 'Joined' }).eq('id', enquiryId));
         });
-        if (ok && newId) { toast(`Registered · Membership ID ${code}`); location.hash = 'member-' + newId; }
+        if (ok && newId) { toast(`Registered · Membership ID ${code}`); location.hash = 'member-' + newId; setTimeout(() => invoiceModal(newId, null, true), 350); }
         return;
       }
       const row = memberRow(v); if (isOwner()) row.brought_by = v.broughtBy || m.broughtBy || me.id;
@@ -1190,20 +1273,24 @@ function memberForm(id, prefill = null, enquiryId = null) {
 function updateBmi() { const el = document.getElementById('bmiCalc'); if (!el) return; const b = bmi({ heightCm: document.getElementById('f_heightCm')?.value, weightKg: document.getElementById('f_weightKg')?.value }); el.innerHTML = b ? `BMI <b>${b.v}</b> · <span class="chip ${b.cls}">${b.label}</span>` : 'Enter height and weight to see BMI.'; }
 function renewForm(id) {
   const m = S.members[id]; if (!m) return; const start = m.expiryDate && diffDays(m.expiryDate, today()) >= 0 ? addDays(m.expiryDate, 1) : today();
-  const offs = offersFor(id);
-  openModal(`Renew ${m.name}`, `<div class="meta">Current expiry: ${esc(fmtDate(m.expiryDate))}</div>` + fieldsHtml([
+  const offs = offersFor(id); const first = !m.expiryDate && !m.payments.length;
+  openModal(first ? `Start membership · ${m.name}` : `Renew ${m.name}`, (first ? `<div class="meta">${esc(m.name)} signed up online (${esc(m.code)}) and has no plan yet.</div>` : `<div class="meta">Current expiry: ${esc(fmtDate(m.expiryDate))}</div>`) + fieldsHtml([
+    ...(first ? [{ k: 'chargeReg', label: 'Charge the one-time registration fee', type: 'checkbox' }, { k: 'regFee', label: 'Registration fee', type: 'number' }] : []),
     { k: 'plan', label: 'Plan', type: 'select', options: Object.keys(PLANS) }, { k: 'amount', label: 'Amount received', type: 'number', req: true },
     { k: 'start', label: 'New period starts', type: 'date', req: true }, { k: 'paidOn', label: 'Payment date', type: 'date', req: true }, { k: 'mode', label: 'Payment mode', type: 'select', options: PAY_MODES },
     ...(offs.length ? [{ k: 'memberOffer', label: 'Apply personal offer', type: 'select', options: offs.map(o => [o.id, o.title]), blank: 'No offer', full: true }] : []),
-    { k: 'offer', label: 'Other offer applied', full: true, ph: 'e.g. Renewal discount 10%' }], { plan: m.plan, amount: m.fee, start, paidOn: today(), mode: 'UPI', memberOffer: offs[0] ? offs[0].id : '' }), {
-    submitLabel: 'Record renewal',
+    { k: 'offer', label: 'Other offer applied', full: true, ph: 'e.g. Renewal discount 10%' }], { plan: m.plan, amount: m.fee || '', start, paidOn: today(), mode: 'UPI', memberOffer: offs[0] ? offs[0].id : '', chargeReg: first, regFee: S.settings.registrationFee }), {
+    submitLabel: first ? 'Start membership' : 'Record renewal',
     submit: v => {
       const exp = addDays(addMonths(v.start, PLANS[v.plan] || 1), -1); const mo = offs.find(o => o.id === v.memberOffer);
       return mutate(async () => {
         await q(supabase.from('members').update({ plan: v.plan, fee: Number(v.amount || 0), expiry_date: exp, frozen: false }).eq('id', id));
-        await q(supabase.from('payments').insert({ member_id: id, paid_on: v.paidOn, amount: Number(v.amount || 0), type: 'renewal', plan: v.plan, mode: v.mode, offer: [mo ? mo.title : '', v.offer].filter(Boolean).join(' + ') || null, member_offer_id: mo ? mo.id : null }));
+        const pays = [{ member_id: id, paid_on: v.paidOn, amount: Number(v.amount || 0), type: first ? 'new' : 'renewal', plan: v.plan, mode: v.mode, offer: [mo ? mo.title : '', v.offer].filter(Boolean).join(' + ') || null, member_offer_id: mo ? mo.id : null }];
+        if (first && v.chargeReg && Number(v.regFee) > 0) pays.unshift({ member_id: id, paid_on: v.paidOn, amount: Number(v.regFee), type: 'registration', mode: v.mode });
+        if (first) await q(supabase.from('members').update({ join_date: v.start }).eq('id', id)).catch(() => {});
+        await q(supabase.from('payments').insert(pays));
         if (mo) await q(supabase.from('member_offers').update({ status: 'used' }).eq('id', mo.id));
-      }, `Renewed until ${fmtDate(exp)}`).then(ok => { if (ok && view === 'member') loadHistory(id).then(render); });
+      }, first ? `Membership started · valid until ${fmtDate(exp)}` : `Renewed until ${fmtDate(exp)}`).then(ok => { if (ok) { if (view === 'member') loadHistory(id).then(render); setTimeout(() => invoiceModal(id, null, true), 350); } });
     },
   });
 }
@@ -1228,7 +1315,7 @@ async function saveStaff(id, v) {
 }
 function staffForm(id) {
   const s = id ? { ...S.staff[id], salary: S.pay[id] } : { title: 'Trainer', joinDate: today(), active: true };
-  openModal(id ? `Edit ${s.name} · ${s.code}` : 'Add employee', (id ? '' : `<div class="meta">An Employee ID (e.g. ${esc(S.settings.employeePrefix)}001) is assigned automatically.</div>`) + fieldsHtml(STAFF_FIELDS(), s), {
+  openModal(id ? `Edit ${s.name} · ${s.code}` : 'Add employee', (id ? '' : `<div class="meta">An Employee ID (e.g. ${esc(S.settings.employeePrefix)}-0001) is assigned automatically. Employee records are for staff only; the owner has a separate owner profile.</div>`) + fieldsHtml(STAFF_FIELDS(), s), {
     submit: v => mutate(() => saveStaff(id, v), id ? 'Employee updated' : 'Employee added'),
   });
 }
@@ -1303,10 +1390,10 @@ function payForm(staffId) {
 function targetsForm() { const m = ui.tMonth || curMonth(); const t = S.targets[m] || {}; openModal(`Gym targets · ${fmtMonth(m)}`, fieldsHtml([{ k: 'revenue', label: 'Revenue target', type: 'number' }, { k: 'newMembers', label: 'New members', type: 'number' }, { k: 'renewals', label: 'Renewals', type: 'number' }, { k: 'checkins', label: 'Total check-ins', type: 'number' }], t), { submit: v => mutate(() => q(supabase.from('targets').upsert({ month: m, revenue: numOrNull(v.revenue), new_members: numOrNull(v.newMembers), renewals: numOrNull(v.renewals), checkins: numOrNull(v.checkins) })), 'Targets saved') }); }
 function settingsForm() {
   openModal('Gym settings', fieldsHtml([{ k: 'gymName', label: 'Gym name', full: true }, { k: 'currency', label: 'Currency symbol' }, { k: 'registrationFee', label: 'One-time registration fee', type: 'number' },
-    { k: 'memberPrefix', label: 'Membership ID prefix', hint: 'e.g. JFS → JFS-0001' }, { k: 'employeePrefix', label: 'Employee ID prefix', hint: 'e.g. JFS-E → JFS-E001' },
+    { k: 'memberPrefix', label: 'Membership ID prefix', hint: 'e.g. JFS-M → JFS-M-0001' }, { k: 'employeePrefix', label: 'Employee ID prefix', hint: 'e.g. JFS-E → JFS-E-0001' }, { k: 'ownerPrefix', label: 'Owner ID prefix', hint: 'e.g. JFS-O → JFS-O-0001' },
     { k: 'paidLeaves', label: 'Paid leave days per employee per month', type: 'number', step: '0.5', hint: 'Unused days don’t carry forward' }, { k: 'offerWindow', label: 'Personal renewal offers allowed from (days before renewal)', type: 'number' },
     { k: 'reminder', label: 'Renewal reminder message', type: 'textarea', full: true, hint: 'Placeholders: {name} {plan} {gym} {date} {when}' }], S.settings) + (isOwner() ? '' : '<div class="meta">Only the owner can change gym settings.</div>'), {
-    submit: isOwner() ? v => mutate(() => q(supabase.from('settings').update({ gym_name: v.gymName || BRAND, currency: v.currency || '₹', registration_fee: Number(v.registrationFee || 0), member_prefix: (v.memberPrefix || 'JFS').toUpperCase().replace(/[^A-Z0-9]/g, '') || 'JFS', employee_prefix: (v.employeePrefix || 'JFS-E').toUpperCase().replace(/[^A-Z0-9-]/g, '') || 'JFS-E', paid_leaves_per_month: Number(v.paidLeaves || 0), renewal_offer_window_days: Math.max(1, Number(v.offerWindow || 30)), reminder: v.reminder || DEFAULT_SETTINGS.reminder }).eq('id', 1)), 'Settings saved') : null,
+    submit: isOwner() ? v => mutate(() => q(supabase.from('settings').update({ gym_name: v.gymName || BRAND, currency: v.currency || '₹', registration_fee: Number(v.registrationFee || 0), member_prefix: (v.memberPrefix || 'JFS-M').toUpperCase().replace(/[^A-Z0-9-]/g, '').replace(/-+$/, '') || 'JFS-M', employee_prefix: (v.employeePrefix || 'JFS-E').toUpperCase().replace(/[^A-Z0-9-]/g, '').replace(/-+$/, '') || 'JFS-E', owner_prefix: (v.ownerPrefix || 'JFS-O').toUpperCase().replace(/[^A-Z0-9-]/g, '').replace(/-+$/, '') || 'JFS-O', paid_leaves_per_month: Number(v.paidLeaves || 0), renewal_offer_window_days: Math.max(1, Number(v.offerWindow || 30)), reminder: v.reminder || DEFAULT_SETTINGS.reminder }).eq('id', 1)), 'Settings saved') : null,
   });
 }
 function confirmDelete(col, id) {
@@ -1428,6 +1515,9 @@ const ACT = {
   planDelete: d => { const l = S.content.plans.slice(); const p = l[Number(d.i)]; if (!p) return; if (l.length <= 1) return toast('Keep at least one plan.'); openModal('Delete plan?', `<p><b>${esc(p.name)}</b> will be removed from the website. Existing members on this plan aren’t affected.</p>`, { danger: true, submitLabel: 'Delete', submit: () => { l.splice(Number(d.i), 1); return saveContent('plans', l, 'Plan deleted'); } }); },
   svcEdit: d => svcForm(d.i == null ? null : Number(d.i)),
   svcDelete: d => { const l = S.content.services.slice(); const g = l[Number(d.i)]; if (g) openModal('Delete group?', `<p><b>${esc(g.title)}</b> will be removed from the website.</p>`, { danger: true, submitLabel: 'Delete', submit: () => { l.splice(Number(d.i), 1); return saveContent('services', l, 'Group deleted'); } }); },
+  invoice: d => invoiceModal(d.id, d.inv), setPin: () => pinForm(),
+  invPrint: () => { if (ui.inv && !printInvoice(ui.inv)) toast('Allow pop-ups to print the invoice.'); },
+  invCopy: async () => { if (!ui.inv) return; try { await navigator.clipboard.writeText(welcomeText(ui.inv)); toast('Message copied'); } catch (e) { toast('Copy failed. Select the text in the invoice instead.'); } },
   closeModal: () => closeModal(),
 };
 
@@ -1467,6 +1557,7 @@ document.addEventListener('dragleave', e => { const z = e.target.closest && e.ta
 document.addEventListener('drop', e => { const z = e.target.closest && e.target.closest('#dropZone'); if (z) { e.preventDefault(); z.classList.remove('over'); const f = e.dataTransfer.files[0]; if (f) restoreRead(f); } });
 document.addEventListener('submit', async e => {
   const form = e.target;
+  if (form.id === 'recoveryForm') { e.preventDefault(); runRecovery(form); return; }
   if (form.id === 'modalForm') { e.preventDefault(); const fn = modalSubmit; const v = formValues(form); closeModal(); if (fn) await fn(v); return; }
   if (form.id === 'authForm') {
     e.preventDefault(); const v = formValues(form); const msg = $('#authMsg'); const btn = form.querySelector('[type=submit]'); btn.disabled = true; msg.innerHTML = '';

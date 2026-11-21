@@ -910,3 +910,234 @@ do $$ declare t text; begin
     end loop;
   end if;
 end $$;
+-- =========================== v7 · IDS, OWNER PROFILE, RECOVERY PIN, INVOICES ===========================
+-- IDs: members JFS-M-0001, employees JFS-E-0001, owner JFS-O-0001 (prefixes in Gym settings).
+alter table public.settings add column if not exists owner_prefix text not null default 'JFS-O';
+alter table public.settings alter column member_prefix set default 'JFS-M';
+alter table public.profiles add column if not exists owner_code text unique;
+create sequence if not exists public.owner_code_seq;
+
+create or replace function public.assign_member_code() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare p text;
+begin
+  if tg_op = 'INSERT' then
+    if current_setting('jfs.restoring', true) = 'on' then return new; end if;
+    -- only the owner may credit a registration to someone else
+    if auth.uid() is not null and not public.is_owner() then new.brought_by := auth.uid(); end if;
+    if new.member_code is null or trim(new.member_code) = '' then
+      select coalesce(nullif(trim(member_prefix), ''), 'JFS-M') into p from public.settings where id = 1;
+      new.member_code := coalesce(p, 'JFS-M') || '-' || lpad(nextval('public.member_code_seq')::text, 4, '0');
+    end if;
+  else
+    new.member_code := old.member_code;
+    new.updated_at := now();
+  end if;
+  return new;
+end $$;
+
+create or replace function public.assign_employee_code() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare p text;
+begin
+  -- the owner has a separate profile and is never an employee
+  if new.profile_id is not null and exists (select 1 from public.profiles where id = new.profile_id and role = 'owner') then
+    if current_setting('jfs.restoring', true) = 'on' then new.profile_id := null;
+    else raise exception 'OWNER_NOT_EMPLOYEE: the owner has a separate profile and cannot be linked to an employee record';
+    end if;
+  end if;
+  if tg_op = 'INSERT' then
+    if new.employee_code is null or trim(new.employee_code) = '' then
+      select coalesce(nullif(trim(employee_prefix), ''), 'JFS-E') into p from public.settings where id = 1;
+      new.employee_code := coalesce(p, 'JFS-E') || '-' || lpad(nextval('public.employee_code_seq')::text, 4, '0');
+    end if;
+  else
+    new.employee_code := old.employee_code;
+  end if;
+  return new;
+end $$;
+
+-- Owner profile: own ID, access never ends, never linked to an employee record.
+create or replace function public.owner_profile_rules() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare p text;
+begin
+  if new.role = 'owner' then
+    new.access_until := null;
+    new.extension_requested_at := null;
+    new.portal := 'staff';
+    new.member_id := null;
+    if new.owner_code is null then
+      select coalesce(nullif(trim(owner_prefix), ''), 'JFS-O') into p from public.settings where id = 1;
+      new.owner_code := coalesce(p, 'JFS-O') || '-' || lpad(nextval('public.owner_code_seq')::text, 4, '0');
+    end if;
+    update public.staff set profile_id = null where profile_id = new.id;
+  end if;
+  return new;
+end $$;
+revoke execute on function public.owner_profile_rules() from public, anon, authenticated;
+drop trigger if exists profiles_owner_rules on public.profiles;
+create trigger profiles_owner_rules before insert or update on public.profiles for each row execute function public.owner_profile_rules();
+
+-- Invitations no longer link an owner to an employee record.
+create or replace function public.claim_invitation() returns json
+language plpgsql security definer set search_path = public as $$
+declare u record; inv record;
+begin
+  select email, email_confirmed_at into u from auth.users where id = auth.uid();
+  if not found then return json_build_object('ok', false, 'reason', 'not_signed_in'); end if;
+  if u.email_confirmed_at is null then return json_build_object('ok', false, 'reason', 'email_not_confirmed'); end if;
+  select * into inv from public.invitations where lower(email) = lower(u.email) and status = 'pending' order by created_at desc limit 1;
+  if not found then return json_build_object('ok', false, 'reason', 'no_invitation'); end if;
+  if inv.role = 'member' and exists (select 1 from public.profiles where member_id = inv.member_id and id <> auth.uid()) then
+    return json_build_object('ok', false, 'reason', 'already_linked');
+  end if;
+  if public.my_role() = 'owner' then
+    update public.invitations set status = 'accepted', accepted_at = now() where id = inv.id;
+    return json_build_object('ok', true, 'role', 'owner', 'note', 'owner_kept');
+  end if;
+  update public.profiles set
+    role = inv.role,
+    access_until = inv.access_until,
+    portal = case when inv.role = 'member' then 'member' else 'staff' end,
+    member_id = case when inv.role = 'member' then inv.member_id else null end,
+    full_name = coalesce(nullif(full_name, ''), inv.full_name),
+    extension_requested_at = null
+  where id = auth.uid();
+  if inv.staff_id is not null and inv.role <> 'owner' then
+    update public.staff set profile_id = null where profile_id = auth.uid() and id <> inv.staff_id;
+    update public.staff set profile_id = auth.uid() where id = inv.staff_id;
+  end if;
+  update public.invitations set status = 'accepted', accepted_at = now() where id = inv.id;
+  return json_build_object('ok', true, 'role', inv.role);
+end $$;
+
+-- Website sign-ups get their Membership ID automatically: link by email, or create one.
+create or replace function public.ensure_my_membership() returns json
+language plpgsql security definer set search_path = public as $$
+declare u record; pr record; mid uuid; mcode text; p text; nm text;
+begin
+  select id, email, email_confirmed_at, raw_user_meta_data into u from auth.users where id = auth.uid();
+  if not found then return json_build_object('ok', false, 'reason', 'not_signed_in'); end if;
+  select * into pr from public.profiles where id = u.id;
+  if pr.role in ('owner','manager','trainer','receptionist') then return json_build_object('ok', false, 'reason', 'staff_account'); end if;
+  if pr.role = 'member' and pr.member_id is not null then
+    return json_build_object('ok', true, 'created', false, 'code', (select member_code from public.members where id = pr.member_id));
+  end if;
+  if coalesce(pr.portal, 'member') <> 'member' then return json_build_object('ok', false, 'reason', 'staff_signup'); end if;
+  if u.email_confirmed_at is null then return json_build_object('ok', false, 'reason', 'email_not_confirmed'); end if;
+  -- a membership the gym already made with this email, not yet linked to another login
+  select mm.id, mm.member_code into mid, mcode from public.members mm
+   where lower(coalesce(mm.email, '')) = lower(u.email)
+     and not exists (select 1 from public.profiles x where x.member_id = mm.id and x.id <> u.id)
+   order by mm.created_at limit 1;
+  if mid is not null then
+    update public.profiles set role = 'member', portal = 'member', member_id = mid where id = u.id;
+    return json_build_object('ok', true, 'created', false, 'code', mcode);
+  end if;
+  select coalesce(nullif(trim(member_prefix), ''), 'JFS-M') into p from public.settings where id = 1;
+  mcode := coalesce(p, 'JFS-M') || '-' || lpad(nextval('public.member_code_seq')::text, 4, '0');
+  nm := left(coalesce(nullif(trim(pr.full_name), ''), nullif(trim(u.raw_user_meta_data->>'full_name'), ''), split_part(u.email, '@', 1)), 100);
+  perform set_config('jfs.restoring', 'on', true);     -- keep brought_by empty: nobody on the team signed them up
+  insert into public.members (member_code, name, email, phone, source, plan, fee, join_date, expiry_date, brought_by, notes)
+  values (mcode, nm, u.email, nullif(left(coalesce(u.raw_user_meta_data->>'phone', ''), 30), ''), 'Website', 'Monthly', 0, current_date, null, null, 'Signed up on the website. No plan paid yet.')
+  returning id into mid;
+  perform set_config('jfs.restoring', 'off', true);
+  insert into public.member_history (member_id, changed_by, changed_by_name, event, changes)
+  values (mid, u.id, 'Website sign-up', 'created', jsonb_build_object('name', jsonb_build_array(null, nm), 'email', jsonb_build_array(null, u.email), 'source', jsonb_build_array(null, 'Website')));
+  update public.profiles set role = 'member', portal = 'member', member_id = mid where id = u.id;
+  return json_build_object('ok', true, 'created', true, 'code', mcode);
+end $$;
+revoke all on function public.ensure_my_membership() from public, anon;
+grant execute on function public.ensure_my_membership() to authenticated;
+
+-- Invoice numbers: one per payment batch (registration + plan paid together share a number).
+alter table public.payments add column if not exists invoice_no text;
+create sequence if not exists public.invoice_seq;
+create or replace function public.assign_invoice_no() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare n bigint; cand text;
+begin
+  if new.invoice_no is not null and trim(new.invoice_no) <> '' then return new; end if;
+  select invoice_no into new.invoice_no from public.payments
+   where member_id = new.member_id and created_at = new.created_at and invoice_no is not null limit 1;
+  if new.invoice_no is not null then return new; end if;
+  loop
+    n := nextval('public.invoice_seq');
+    cand := 'INV-' || to_char(coalesce(new.paid_on, current_date), 'YYYY') || '-' || lpad(n::text, 5, '0');
+    exit when not exists (select 1 from public.payments where invoice_no = cand);
+  end loop;
+  new.invoice_no := cand;
+  return new;
+end $$;
+revoke execute on function public.assign_invoice_no() from public, anon, authenticated;
+drop trigger if exists payments_invoice_no on public.payments;
+create trigger payments_invoice_no before insert on public.payments for each row execute function public.assign_invoice_no();
+create index if not exists payments_invoice_idx on public.payments (invoice_no);
+
+-- Owner recovery PIN: the owner sets it; a manager who knows it can restore the owner's login.
+create table if not exists public.owner_recovery (
+  id            int primary key default 1 check (id = 1),
+  pin_hash      text,
+  set_at        timestamptz,
+  failed        int not null default 0,
+  locked_until  timestamptz
+);
+alter table public.owner_recovery enable row level security;       -- no policies: functions only
+create table if not exists public.recovery_log (
+  id            uuid primary key default gen_random_uuid(),
+  at            timestamptz not null default now(),
+  manager_id    uuid,
+  manager_name  text,
+  action        text not null,
+  ok            boolean not null,
+  detail        text
+);
+alter table public.recovery_log enable row level security;
+drop policy if exists recovery_log_owner_read on public.recovery_log;
+create policy recovery_log_owner_read on public.recovery_log for select to authenticated using (public.is_owner());
+grant select on public.recovery_log to authenticated;
+
+create or replace function public.set_recovery_pin(p_pin text) returns json
+language plpgsql security definer set search_path = public, extensions as $$
+begin
+  if not public.is_owner() then return json_build_object('ok', false, 'reason', 'not_owner'); end if;
+  if p_pin !~ '^[0-9]{6,8}$' then return json_build_object('ok', false, 'reason', 'pin_format'); end if;
+  insert into public.owner_recovery (id, pin_hash, set_at, failed, locked_until) values (1, extensions.crypt(p_pin, extensions.gen_salt('bf', 10)), now(), 0, null)
+  on conflict (id) do update set pin_hash = excluded.pin_hash, set_at = now(), failed = 0, locked_until = null;
+  insert into public.recovery_log (manager_id, manager_name, action, ok, detail) values (auth.uid(), (select full_name from public.profiles where id = auth.uid()), 'pin_set', true, 'Recovery PIN set by the owner');
+  return json_build_object('ok', true);
+end $$;
+create or replace function public.recovery_status() returns json
+language sql security definer set search_path = public as $$
+  select json_build_object('set', coalesce((select pin_hash is not null from public.owner_recovery where id = 1), false),
+                           'set_at', (select set_at from public.owner_recovery where id = 1),
+                           'locked_until', (select locked_until from public.owner_recovery where id = 1))
+  where public.is_staff();
+$$;
+-- Called by the owner-recovery function with the manager's own login.
+create or replace function public.use_recovery_pin(p_pin text) returns json
+language plpgsql security definer set search_path = public, extensions as $$
+declare r record; o record; who text;
+begin
+  if public.my_role() <> 'manager' then return json_build_object('ok', false, 'reason', 'not_manager'); end if;
+  select full_name into who from public.profiles where id = auth.uid();
+  select * into r from public.owner_recovery where id = 1 for update;
+  if not found or r.pin_hash is null then return json_build_object('ok', false, 'reason', 'no_pin'); end if;
+  if r.locked_until is not null and r.locked_until > now() then return json_build_object('ok', false, 'reason', 'locked', 'until', r.locked_until); end if;
+  if extensions.crypt(coalesce(p_pin, ''), r.pin_hash) <> r.pin_hash then
+    update public.owner_recovery set failed = failed + 1, locked_until = case when failed + 1 >= 5 then now() + interval '30 minutes' else null end where id = 1;
+    insert into public.recovery_log (manager_id, manager_name, action, ok, detail) values (auth.uid(), who, 'pin_check', false, 'Wrong PIN');
+    return json_build_object('ok', false, 'reason', case when r.failed + 1 >= 5 then 'locked' else 'wrong_pin' end, 'tries_left', greatest(0, 4 - r.failed));
+  end if;
+  update public.owner_recovery set failed = 0, locked_until = null where id = 1;
+  select p.id, u.email into o from public.profiles p join auth.users u on u.id = p.id where p.role = 'owner' order by p.created_at limit 1;
+  if not found then return json_build_object('ok', false, 'reason', 'no_owner'); end if;
+  return json_build_object('ok', true, 'owner_id', o.id, 'owner_email', o.email, 'manager_name', who);
+end $$;
+revoke all on function public.set_recovery_pin(text) from public, anon;
+revoke all on function public.recovery_status() from public, anon;
+revoke all on function public.use_recovery_pin(text) from public, anon;
+grant execute on function public.set_recovery_pin(text), public.recovery_status(), public.use_recovery_pin(text) to authenticated;
+-- Data migrated by v7 on the live project: codes renumbered to JFS-M-/JFS-E-, owner unlinked from employee records,
+-- invoice numbers given to past payments. (On a fresh install there is no old data, so nothing to migrate.)

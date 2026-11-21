@@ -42,6 +42,20 @@ then invite staff from **Team & logins**. An owner who accepts another invitatio
 - **Themes & visuals:** workout themes for the website background, the Employee Dashboard theme (same as website, one
   theme for everyone, each person picks, or plain), and which logo animations rotate.
 
+## IDs, owner profile and recovery
+- IDs are automatic: members **JFS-M-0001**, employees **JFS-E-0001**, owner **JFS-O-0001** (prefixes in Gym settings).
+- Employee records are for staff only. The owner has a separate owner profile, can't be linked to an employee
+  record, and their access never ends.
+- **Owner recovery PIN:** the owner sets it in Logins & Access. If the owner loses their password or email, a
+  Manager opens **Owner recovery**, enters the PIN and either sends a reset link or sets a new owner email and
+  password. 5 wrong tries lock it for 30 minutes; every attempt is shown to the owner. This uses the Supabase Edge
+  Function `owner-recovery` (source in `supabase/functions/owner-recovery`).
+
+## Welcome note and invoice
+After registering a member, starting a website sign-up's first plan, or recording a renewal, the dashboard opens the
+invoice (number like INV-2026-00001) with **Email**, **WhatsApp**, **Print / Save as PDF** and **Copy message**.
+Members can also open their invoices in the Member portal.
+
 ## Local development
 ```bash
 npm install

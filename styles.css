@@ -393,3 +393,21 @@ body{background:transparent}
 .auth-reel{width:min(260px,70vw);aspect-ratio:1;margin:-10px auto -6px;-webkit-mask-image:radial-gradient(closest-side,#000 70%,transparent 100%);mask-image:radial-gradient(closest-side,#000 70%,transparent 100%)}
 .auth-reel video{width:100%;height:100%;object-fit:cover;display:block;mix-blend-mode:screen}
 .auth-reel[hidden]{display:none}
+
+/* ---------- animated top-left logo: the two half-barbells do a slow "rep" ---------- */
+.logo .mark,.brand .mark{overflow:visible}
+.logo .mark .m1,.logo .mark .m2,.brand .mark .m1,.brand .mark .m2{transform-box:view-box;transform-origin:center}
+@media (prefers-reduced-motion:no-preference){
+  .logo .mark .m1,.brand .mark .m1{animation:jfs-rep-a 4.8s cubic-bezier(.45,0,.25,1) infinite}
+  .logo .mark .m2,.brand .mark .m2{animation:jfs-rep-b 4.8s cubic-bezier(.45,0,.25,1) infinite}
+  .logo .mark,.brand .mark{animation:jfs-glow 4.8s ease-in-out infinite}
+  .logo:hover .mark .m1,.brand:hover .mark .m1{animation-duration:1.2s}
+  .logo:hover .mark .m2,.brand:hover .mark .m2{animation-duration:1.2s}
+  .logo:hover .mark,.brand:hover .mark{animation-duration:1.2s}
+}
+@keyframes jfs-rep-a{0%,55%,100%{transform:none}70%{transform:translate(14px,-26px)}80%{transform:translate(14px,-26px)}}
+@keyframes jfs-rep-b{0%,55%,100%{transform:none}70%{transform:translate(-14px,26px)}80%{transform:translate(-14px,26px)}}
+@keyframes jfs-glow{0%,55%,100%{filter:none}72%{filter:drop-shadow(0 0 6px rgba(232,162,114,.75))}}
+.mytheme[hidden]{display:none}
+.form label.radio{flex-direction:row;align-items:center;gap:8px;font-weight:500}
+.form label.radio input{width:auto}
