@@ -6,7 +6,7 @@ const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 export function mountReel(el, cfg) {
   if (!el) return;
-  const list = (cfg && cfg.enabled !== false ? cfg.videos || [] : []).filter(v => v.enabled !== false && LOGO_VIDEOS[v.id]);
+  const list = (cfg ? cfg.videos || [] : []).filter(v => v.enabled !== false && LOGO_VIDEOS[v.id]);
   const sig = JSON.stringify(list.map(v => v.id));
   if (el.dataset.reel === sig && el.querySelector('video')) return;
   el.dataset.reel = sig;

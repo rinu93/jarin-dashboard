@@ -856,8 +856,9 @@ function visualsPanels() {
       <div class="seg wrap" role="group" aria-label="Dashboard theme">${DASH_MODES.map(([k, l]) => `<button data-act="dashMode" data-v="${k}" aria-pressed="${(cfg.dashboardMode || 'follow') === k}">${l}</button>`).join('')}</div>
       ${cfg.dashboardMode === 'fixed' ? `<label class="lbl" for="dashTheme">Theme for everyone</label><select id="dashTheme" class="field-inline" data-act-change="dashTheme">${all.map(m => `<option value="${esc(m.id)}" ${m.id === cfg.dashboardTheme ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>` : ''}
       ${cfg.dashboardMode === 'personal' ? '<p class="meta">Each person chooses under “My theme” at the bottom of the menu. Their choice stays on their own device.</p>' : ''}</section>
-    <section class="panel"><h2>Logo animations</h2><p class="meta" style="margin:0 0 10px">Your animated logos play one after another in the website’s hero${rc.dashboard !== false ? ' and on the dashboard sign-in screen' : ''}.</p>
-      <label class="lbl" style="display:flex;gap:8px;align-items:center"><input type="checkbox" data-act-change="reelOn" ${rc.enabled !== false ? 'checked' : ''}> Show logo animations on the website</label>
+    <section class="panel"><h2>Logo animations</h2><p class="meta" style="margin:0 0 10px">Your animated logos play as the website’s loading screen, once per visit${rc.dashboard !== false ? ', and on the dashboard sign-in screen' : ''}. Visitors can always skip it.</p>
+      <label class="lbl" style="display:flex;gap:8px;align-items:center"><input type="checkbox" data-act-change="reelOn" ${rc.loader !== false ? 'checked' : ''}> Play as the website loading screen</label>
+      ${rc.loader !== false ? `<label class="lbl" for="reelSecs">Loading screen length</label><select id="reelSecs" class="field-inline" data-act-change="reelSecs">${[5, 10, 15, 20, 30].map(n => `<option value="${n}" ${n === (Number(rc.loaderSeconds) || 15) ? 'selected' : ''}>${n} seconds</option>`).join('')}</select>` : ''}
       <label class="lbl" style="display:flex;gap:8px;align-items:center;margin-top:6px"><input type="checkbox" data-act-change="reelDash" ${rc.dashboard !== false ? 'checked' : ''}> Also show on the dashboard sign-in screen</label>
       <div class="reel-list">${vids.map((v, i) => `<div class="reel-item ${v.enabled === false ? 'off' : ''}"><button class="reel-thumb" data-act="reelPreview" data-id="${esc(v.id)}" aria-label="Play ${esc(v.name)}"><img src="/media/${esc(v.id)}.jpg" alt="" loading="lazy"></button>
         <div><b>${esc(v.name || LOGO_VIDEOS[v.id] || v.id)}</b><div class="row-actions"><label class="switch"><input type="checkbox" data-act-change="reelVid" data-id="${esc(v.id)}" ${v.enabled !== false ? 'checked' : ''}><span>${v.enabled !== false ? 'On' : 'Off'}</span></label>
@@ -1039,7 +1040,7 @@ function authCard(inner) {
 }let authReelCfg = null;
 function mountAuthReel() {
   const el = document.getElementById('authReel'); if (!el) return;
-  const cfg = authReelCfg; const on = cfg && cfg.enabled !== false && cfg.dashboard !== false && (cfg.videos || []).some(v => v.enabled !== false);
+  const cfg = authReelCfg; const on = cfg && cfg.dashboard !== false && (cfg.videos || []).some(v => v.enabled !== false);
   el.hidden = !on; document.querySelector('.auth-card')?.classList.toggle('with-reel', !!on);
   if (on) mountReel(el, cfg);
 }
@@ -1443,7 +1444,8 @@ document.addEventListener('change', e => {
   if (a === 'mixEnabled') { const on = el.checked; if (!on && allMixes().filter(m => m.enabled).length <= 1) { el.checked = true; toast('Keep at least one mix playing.'); return; } mutate(() => q(supabase.from('site_themes').update({ enabled: on }).eq('id', el.dataset.id)), on ? 'Mix is playing on the website' : 'Mix taken off the website'); return; }
   if (a === 'myTheme') { try { if (el.value) localStorage.setItem(dashKey(), el.value); else localStorage.removeItem(dashKey()); } catch (e) { /* ignore */ } applyDashTheme(); toast('Your dashboard theme is saved on this device'); return; }
   if (a === 'dashTheme') { setThemeCfg({ dashboard_theme: el.value }, 'Dashboard theme updated'); return; }
-  if (a === 'reelOn' || a === 'reelDash') { saveContent('logo_reel', { ...reelCfg(), [a === 'reelOn' ? 'enabled' : 'dashboard']: el.checked }, 'Logo animations updated'); return; }
+  if (a === 'reelOn' || a === 'reelDash') { saveContent('logo_reel', { ...reelCfg(), [a === 'reelOn' ? 'loader' : 'dashboard']: el.checked }, 'Logo animations updated'); return; }
+  if (a === 'reelSecs') { saveContent('logo_reel', { ...reelCfg(), loaderSeconds: Number(el.value) }, `Loading screen set to ${el.value} seconds`); return; }
   if (a === 'reelVid') { const rc = reelCfg(); if (!el.checked && rc.videos.filter(v => v.enabled !== false).length <= 1) { el.checked = true; toast('Keep at least one animation on, or switch the reel off above.'); return; } saveContent('logo_reel', { ...rc, videos: rc.videos.map(v => v.id === el.dataset.id ? { ...v, enabled: el.checked } : v) }, el.checked ? 'Animation added to the reel' : 'Animation removed from the reel'); return; }
   if (a === 'mixInterval') { setThemeCfg({ interval_sec: Number(el.value) }); return; }
   if (a === 'mixPinned') { setThemeCfg({ pinned: el.value }, 'Pinned mix updated'); return; }
