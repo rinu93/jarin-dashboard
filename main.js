@@ -3,8 +3,9 @@ import { WEBSITE_URL } from './config.js';
 import { logoUrl, BRAND, MARK, LOCKUP, TAGLINE } from './brand.js';
 import { supabase, configured } from './supabase.js';
 import { MOTIONS, DAYPARTS, DEFAULT_MIXES, fromRow, configFromRow, playlist, createStage, readability, daypartNow } from './mixes.js';
-import { DEFAULT_CONTENT, contentFromRows, OFFER_KINDS, LOGO_VIDEOS, WEEK } from './content.js';
+import { DEFAULT_CONTENT, contentFromRows, OFFER_KINDS, LOGO_VIDEOS, WEEK, INTRO_SCREENS, introFor } from './content.js';
 import { mountReel } from './reel.js';
+import { showLoader } from './loader.js';
 import { invoiceData, invoiceHtml, INVOICE_CSS, welcomeText, welcomeSubject, printInvoice } from './invoice.js';
 import {
   esc, parse, today, nowTime, addDays, addMonths, diffDays, mKey, curMonth, shiftMonth,
@@ -864,10 +865,13 @@ function visualsPanels() {
       <div class="seg wrap" role="group" aria-label="Dashboard theme">${DASH_MODES.map(([k, l]) => `<button data-act="dashMode" data-v="${k}" aria-pressed="${(cfg.dashboardMode || 'follow') === k}">${l}</button>`).join('')}</div>
       ${cfg.dashboardMode === 'fixed' ? `<label class="lbl" for="dashTheme">Theme for everyone</label><select id="dashTheme" class="field-inline" data-act-change="dashTheme">${all.map(m => `<option value="${esc(m.id)}" ${m.id === cfg.dashboardTheme ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>` : ''}
       ${cfg.dashboardMode === 'personal' ? '<p class="meta">Each person chooses under “My theme” at the bottom of the menu. Their choice stays on their own device.</p>' : ''}</section>
-    <section class="panel"><h2>Logo animations</h2><p class="meta" style="margin:0 0 10px">Your animated logos play as the website’s loading screen, once per visit${rc.dashboard !== false ? ', and on the dashboard sign-in screen' : ''}. Visitors can always skip it.</p>
-      <label class="lbl" style="display:flex;gap:8px;align-items:center"><input type="checkbox" data-act-change="reelOn" ${rc.loader !== false ? 'checked' : ''}> Play as the website loading screen</label>
-      ${rc.loader !== false ? `<label class="lbl" for="reelSecs">Loading screen length</label><select id="reelSecs" class="field-inline" data-act-change="reelSecs">${[5, 10, 15, 20, 30].map(n => `<option value="${n}" ${n === (Number(rc.loaderSeconds) || 15) ? 'selected' : ''}>${n} seconds</option>`).join('')}</select>` : ''}
-      <label class="lbl" style="display:flex;gap:8px;align-items:center;margin-top:6px"><input type="checkbox" data-act-change="reelDash" ${rc.dashboard !== false ? 'checked' : ''}> Also show on the dashboard sign-in screen</label>
+    <section class="panel"><h2>Logo animations</h2><p class="meta" style="margin:0 0 10px">An intro plays every time each page opens, then fades through frosted glass into the page.${isOwner() ? '' : ' Only the owner can change the intros.'}</p>
+      <div class="intro-list">${Object.entries(INTRO_SCREENS).map(([k, l]) => { const c = introFor(rc, k); const dis = isOwner() ? '' : 'disabled'; return `<div class="intro-row ${c.on ? '' : 'off'}">
+        <label class="switch"><input type="checkbox" data-act-change="introOn" data-screen="${k}" ${c.on ? 'checked' : ''} ${dis} aria-label="Play an intro on the ${esc(l)}"><span>${esc(l)}</span></label>
+        <select class="field-inline" data-act-change="introClip" data-screen="${k}" aria-label="${esc(l)} animation" ${c.on ? '' : 'disabled'} ${dis}><option value="all" ${c.clip === 'all' ? 'selected' : ''}>All, in reel order</option>${vids.map(v => `<option value="${esc(v.id)}" ${c.clip === v.id ? 'selected' : ''}>${esc(v.name || LOGO_VIDEOS[v.id])}</option>`).join('')}</select>
+        <select class="field-inline" data-act-change="introSecs" data-screen="${k}" aria-label="${esc(l)} intro length" ${c.on ? '' : 'disabled'} ${dis}>${[3, 5, 8, 10, 15, 20, 30].map(n => `<option value="${n}" ${n === c.seconds ? 'selected' : ''}>${n} seconds</option>`).join('')}</select></div>`; }).join('')}</div>
+      <label class="lbl" style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" data-act-change="reelDash" ${rc.dashboard !== false ? 'checked' : ''}> Keep the logo animating on the Employee sign-in card</label>
+      <p class="meta" style="margin:10px 0 0">The reel below sets which animations “All” plays, and in what order.</p>
       <div class="reel-list">${vids.map((v, i) => `<div class="reel-item ${v.enabled === false ? 'off' : ''}"><button class="reel-thumb" data-act="reelPreview" data-id="${esc(v.id)}" aria-label="Play ${esc(v.name)}"><img src="/media/${esc(v.id)}.jpg" alt="" loading="lazy"></button>
         <div><b>${esc(v.name || LOGO_VIDEOS[v.id] || v.id)}</b><div class="row-actions"><label class="switch"><input type="checkbox" data-act-change="reelVid" data-id="${esc(v.id)}" ${v.enabled !== false ? 'checked' : ''}><span>${v.enabled !== false ? 'On' : 'Off'}</span></label>
         <button class="btn sm" data-act="reelMove" data-id="${esc(v.id)}" data-v="-1" ${i === 0 ? 'disabled' : ''} aria-label="Play ${esc(v.name)} earlier">↑</button><button class="btn sm" data-act="reelMove" data-id="${esc(v.id)}" data-v="1" ${i === vids.length - 1 ? 'disabled' : ''} aria-label="Play ${esc(v.name)} later">↓</button></div></div></div>`).join('')}</div></section></div>`;
@@ -1120,7 +1124,9 @@ function authCard(inner) {
   document.body.classList.add('authpage');
   setTimeout(mountAuthReel, 0);
   root.innerHTML = `<div class="auth"><div class="auth-card"><div class="auth-reel" id="authReel" aria-hidden="true"></div><img class="auth-logo" src="${logoUrl}" alt="${BRAND} – ${TAGLINE}" width="1000" height="375"><div class="meta" style="font-size:13px;font-weight:600">Employee Dashboard</div>${inner}<a class="meta" href="${WEBSITE_URL}" style="text-decoration:none">Go to the JARIN website</a></div></div>`;
-}let authReelCfg = null;
+}
+showLoader('employee');
+let authReelCfg = null;
 function mountAuthReel() {
   const el = document.getElementById('authReel'); if (!el) return;
   const cfg = authReelCfg; const on = cfg && cfg.dashboard !== false && (cfg.videos || []).some(v => v.enabled !== false);
@@ -1534,8 +1540,16 @@ document.addEventListener('change', e => {
   if (a === 'mixEnabled') { const on = el.checked; if (!on && allMixes().filter(m => m.enabled).length <= 1) { el.checked = true; toast('Keep at least one mix playing.'); return; } mutate(() => q(supabase.from('site_themes').update({ enabled: on }).eq('id', el.dataset.id)), on ? 'Mix is playing on the website' : 'Mix taken off the website'); return; }
   if (a === 'myTheme') { try { if (el.value) localStorage.setItem(dashKey(), el.value); else localStorage.removeItem(dashKey()); } catch (e) { /* ignore */ } applyDashTheme(); toast('Your dashboard theme is saved on this device'); return; }
   if (a === 'dashTheme') { setThemeCfg({ dashboard_theme: el.value }, 'Dashboard theme updated'); return; }
-  if (a === 'reelOn' || a === 'reelDash') { saveContent('logo_reel', { ...reelCfg(), [a === 'reelOn' ? 'loader' : 'dashboard']: el.checked }, 'Logo animations updated'); return; }
-  if (a === 'reelSecs') { saveContent('logo_reel', { ...reelCfg(), loaderSeconds: Number(el.value) }, `Loading screen set to ${el.value} seconds`); return; }
+  if (a === 'reelDash') { saveContent('logo_reel', { ...reelCfg(), dashboard: el.checked }, 'Logo animations updated'); return; }
+  if (a === 'introOn' || a === 'introClip' || a === 'introSecs') {
+    if (!isOwner()) return;
+    const rc = reelCfg(); const k = el.dataset.screen; const name = INTRO_SCREENS[k];
+    const screens = Object.fromEntries(Object.keys(INTRO_SCREENS).map(s => [s, introFor(rc, s)]));
+    const c = screens[k];
+    if (a === 'introOn') c.on = el.checked; else if (a === 'introClip') c.clip = el.value; else c.seconds = Number(el.value);
+    const msg = a === 'introOn' ? `${name} intro ${c.on ? 'on' : 'off'}` : a === 'introClip' ? `${name} intro: ${c.clip === 'all' ? 'all animations' : LOGO_VIDEOS[c.clip]}` : `${name} intro set to ${c.seconds} seconds`;
+    saveContent('logo_reel', { ...rc, screens }, msg); return;
+  }
   if (a === 'reelVid') { const rc = reelCfg(); if (!el.checked && rc.videos.filter(v => v.enabled !== false).length <= 1) { el.checked = true; toast('Keep at least one animation on, or switch the reel off above.'); return; } saveContent('logo_reel', { ...rc, videos: rc.videos.map(v => v.id === el.dataset.id ? { ...v, enabled: el.checked } : v) }, el.checked ? 'Animation added to the reel' : 'Animation removed from the reel'); return; }
   if (a === 'mixInterval') { setThemeCfg({ interval_sec: Number(el.value) }); return; }
   if (a === 'mixPinned') { setThemeCfg({ pinned: el.value }, 'Pinned mix updated'); return; }
