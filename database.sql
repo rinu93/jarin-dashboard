@@ -590,7 +590,7 @@ language plpgsql security definer set search_path = public as $$
 declare
   t text; n int; cols text; counts jsonb := '{}'::jsonb;
   tables text[] := array['staff','staff_pay','staff_attendance','staff_targets','payroll','members','payments','attendance',
-                         'member_history','member_offers','targets','equipment','service_logs','expenses','offers','enquiries'];
+                         'member_history','member_offers','targets','equipment','service_logs','expenses','offers','enquiries','site_themes'];
 begin
   if not public.is_owner() then return json_build_object('ok', false, 'reason', 'not_owner'); end if;
   perform set_config('jfs.restoring', 'on', true);
@@ -759,4 +759,76 @@ do $$ declare f text; begin
   foreach f in array array['assign_employee_code()','assign_member_code()','handle_new_user()','log_member_change()','protect_member_details()','stamp_offer_author()','stamp_payment_author()','stamp_request_author()'] loop
     execute format('revoke execute on function public.%s from public, anon, authenticated', f);
   end loop;
+end $$;
+-- =========================== WEBSITE THEMES ("workout mixes") ===========================
+-- The website background rotates through these mixes. The owner manages them from the
+-- Employee Dashboard → Website themes. Anyone can read enabled mixes; only the owner edits.
+create table if not exists public.site_themes (
+  id         text primary key check (id ~ '^[a-z0-9-]{2,40}$'),
+  name       text not null check (char_length(name) between 1 and 40),
+  tagline    text check (tagline is null or char_length(tagline) <= 90),
+  color_a    text not null check (color_a ~ '^#[0-9A-Fa-f]{6}$'),
+  color_b    text not null check (color_b ~ '^#[0-9A-Fa-f]{6}$'),
+  color_c    text not null check (color_c ~ '^#[0-9A-Fa-f]{6}$'),
+  motion     text not null default 'ember' check (motion in ('ember','pulse','flow','grid','aurora')),
+  bpm        int  not null default 120 check (bpm between 50 and 200),
+  daypart    text not null default 'any' check (daypart in ('any','morning','midday','evening','night')),
+  enabled    boolean not null default true,
+  sort       int  not null default 0,
+  builtin    boolean not null default false,
+  updated_at timestamptz not null default now(),
+  updated_by uuid default auth.uid()
+);
+create table if not exists public.site_theme_config (
+  id               int primary key default 1 check (id = 1),
+  mode             text not null default 'rotate' check (mode in ('rotate','pinned','daypart')),
+  interval_sec     int  not null default 40 check (interval_sec between 10 and 3600),
+  pinned           text references public.site_themes(id) on delete set null,
+  visitor_controls boolean not null default true,
+  updated_at       timestamptz not null default now()
+);
+insert into public.site_themes (id, name, tagline, color_a, color_b, color_c, motion, bpm, daypart, sort, builtin) values
+  ('beast-mode',      'Beast Mode',      'Heavy compound lifts. Copper heat.',      '#E8A272', '#B86B3C', '#FF7A33', 'ember',  138, 'evening', 1, true),
+  ('cardio-rush',     'Cardio Rush',     'Intervals, sprints and a racing heart.',  '#FF8A8A', '#C2334A', '#FF3D6E', 'pulse',  165, 'morning', 2, true),
+  ('sunrise-session', 'Sunrise Session', 'First light, first rep.',                 '#FFC56B', '#D9822B', '#FF9A5B', 'aurora', 108, 'morning', 3, true),
+  ('zen-stretch',     'Zen Stretch',     'Mobility, breath and recovery.',          '#7FE0C8', '#2F8F7E', '#8FD3FF', 'flow',    72, 'midday',  4, true),
+  ('iron-steel',      'Iron & Steel',    'Cold steel, clean form.',                 '#9CC4FF', '#4A6FA5', '#D6E6FF', 'pulse',  120, 'midday',  5, true),
+  ('night-grind',     'Night Grind',     'After hours. Neon on the floor.',         '#B9A0FF', '#6A4FD8', '#FF6BD6', 'grid',   128, 'night',   6, true)
+on conflict (id) do nothing;
+insert into public.site_theme_config (id) values (1) on conflict (id) do nothing;
+
+create or replace function public.stamp_theme() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  new.updated_at := now();
+  if tg_table_name = 'site_themes' and auth.uid() is not null then new.updated_by := auth.uid(); end if;
+  return new;
+end $$;
+revoke execute on function public.stamp_theme() from public, anon, authenticated;
+drop trigger if exists stamp_site_themes on public.site_themes;
+create trigger stamp_site_themes before insert or update on public.site_themes for each row execute function public.stamp_theme();
+drop trigger if exists stamp_site_theme_config on public.site_theme_config;
+create trigger stamp_site_theme_config before update on public.site_theme_config for each row execute function public.stamp_theme();
+
+alter table public.site_themes enable row level security;
+alter table public.site_theme_config enable row level security;
+drop policy if exists themes_public_read on public.site_themes;
+create policy themes_public_read on public.site_themes for select to anon, authenticated using (enabled or public.is_owner());
+drop policy if exists themes_owner_write on public.site_themes;
+create policy themes_owner_write on public.site_themes for all to authenticated using (public.is_owner()) with check (public.is_owner());
+drop policy if exists theme_config_read on public.site_theme_config;
+create policy theme_config_read on public.site_theme_config for select to anon, authenticated using (true);
+drop policy if exists theme_config_write on public.site_theme_config;
+create policy theme_config_write on public.site_theme_config for update to authenticated using (public.is_owner()) with check (public.is_owner());
+grant select on public.site_themes, public.site_theme_config to anon, authenticated;
+grant insert, update, delete on public.site_themes to authenticated;
+grant update on public.site_theme_config to authenticated;
+do $$ declare t text; begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    foreach t in array array['site_themes','site_theme_config'] loop
+      if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t) then
+        execute format('alter publication supabase_realtime add table public.%I', t);
+      end if;
+    end loop;
+  end if;
 end $$;

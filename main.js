@@ -2,6 +2,7 @@ import './styles.css';
 import { WEBSITE_URL } from './config.js';
 import { logoUrl, BRAND, MARK, LOCKUP, TAGLINE } from './brand.js';
 import { supabase, configured } from './supabase.js';
+import { MOTIONS, DAYPARTS, DEFAULT_MIXES, fromRow, configFromRow, playlist, createStage, readability, daypartNow } from './mixes.js';
 import {
   esc, parse, today, nowTime, addDays, addMonths, diffDays, mKey, curMonth, shiftMonth,
   fmtDate, fmtShort, fmtMonth, fmtMonthS, barChart, pairChart, lineChart, dualChart, donut, gauge, heatmap, funnel, toCsv, download,
@@ -30,6 +31,7 @@ const VIEWS = [
   ['targets', 'Targets', MGR],
   ['equipment', 'Equipment', ALL],
   ['team', 'Logins & Access', OWN],
+  ['themes', 'Website themes', OWN],
   ['backup', 'Backup & restore', OWN],
 ];
 const PLANS = { 'Monthly': 1, 'Quarterly': 3, 'Half-yearly': 6, 'Annual': 12 };
@@ -49,8 +51,8 @@ const PERSONAL = { name: 'name', phone: 'phone', email: 'email', heightCm: 'heig
 const DIRECT = { weightKg: 'weight_kg', trainerId: 'trainer_id', plan: 'plan', fee: 'fee', expiryDate: 'expiry_date', frozen: 'frozen', offer: 'offer' };
 const DEFAULT_SETTINGS = { gymName: BRAND, currency: '₹', memberPrefix: 'JFS', employeePrefix: 'JFS-E', registrationFee: 500, paidLeaves: 2, offerWindow: 30, reminder: 'Hi {name}, your {plan} membership at {gym} {when} on {date}. Renew at the front desk to keep training without a break!' };
 
-const S = { members: {}, attendance: {}, staff: {}, pay: {}, staffAtt: [], staffTargets: [], payroll: [], targets: {}, equipment: {}, offers: [], memberOffers: [], enquiries: [], expenses: [], requests: [], invitations: [], profiles: [], settings: { ...DEFAULT_SETTINGS } };
-const ui = { enqSource: 'all', restore: null, as: '', meMonth: null, clientSeg: 'all', enqFilter: 'open', memberId: null, history: null, historyFor: null, q: '', memberFilter: 'all', attDate: null, attQ: '', renewSeg: 'due7', payMonth: null, finMonth: null, tMonth: null, staffMonth: null, eqFilter: 'all', staffView: null };
+const S = { members: {}, attendance: {}, staff: {}, pay: {}, staffAtt: [], staffTargets: [], payroll: [], targets: {}, equipment: {}, offers: [], memberOffers: [], enquiries: [], expenses: [], requests: [], invitations: [], profiles: [], themes: [], themeCfg: null, settings: { ...DEFAULT_SETTINGS } };
+const ui = { mixPreview: null, enqSource: 'all', restore: null, as: '', meMonth: null, clientSeg: 'all', enqFilter: 'open', memberId: null, history: null, historyFor: null, q: '', memberFilter: 'all', attDate: null, attQ: '', renewSeg: 'due7', payMonth: null, finMonth: null, tMonth: null, staffMonth: null, eqFilter: 'all', staffView: null };
 let session = null, me = null, view = 'overview', loading = true, recovery = false;
 
 const $ = s => document.querySelector(s);
@@ -189,7 +191,7 @@ async function q(promise) { const { data, error } = await promise; if (error) th
 
 async function loadAll() {
   const since = addDays(today(), -400);
-  const [mem, pay, att, eq, logs, tg, st, staff, spay, satt, stg, prl, offers, moff, enq, exp, req, inv, prof] = await Promise.all([
+  const [mem, pay, att, eq, logs, tg, st, staff, spay, satt, stg, prl, offers, moff, enq, exp, req, inv, prof, themes, tcfg] = await Promise.all([
     q(supabase.from('members').select('*')),
     q(supabase.from('payments').select('*')),
     q(supabase.from('attendance').select('id,member_id,visit_date,visit_time').gte('visit_date', since).limit(100000)),
@@ -209,6 +211,8 @@ async function loadAll() {
     q(supabase.from('change_requests').select('*').order('created_at', { ascending: false }).limit(300)),
     isOwner() ? q(supabase.from('invitations').select('*').order('created_at', { ascending: false })) : [],
     isOwner() ? q(supabase.from('profiles').select('*').order('created_at')) : [],
+    isOwner() ? q(supabase.from('site_themes').select('*').order('sort')).catch(() => []) : [],
+    isOwner() ? q(supabase.from('site_theme_config').select('*').eq('id', 1).maybeSingle()).catch(() => null) : null,
   ]);
   const M = {};
   for (const m of mem) M[m.id] = { code: m.member_code || '', name: m.name, phone: m.phone, email: m.email, heightCm: m.height_cm, weightKg: m.weight_kg, goal: m.goal, source: m.source, referredBy: m.referred_by, offer: m.offer, plan: m.plan, fee: Number(m.fee), joinDate: m.join_date, expiryDate: m.expiry_date, trainerId: m.trainer_id, broughtBy: m.brought_by, frozen: m.frozen, notes: m.notes, createdAt: m.created_at, payments: [] };
@@ -221,7 +225,7 @@ async function loadAll() {
   const T = {}; for (const t of tg) T[t.month] = { revenue: t.revenue, newMembers: t.new_members, renewals: t.renewals, checkins: t.checkins };
   const SF = {}; for (const s of staff) SF[s.id] = { code: s.employee_code || '', name: s.name, title: s.role, phone: s.phone, email: s.email, joinDate: s.join_date, shift: s.shift, weeklyOff: s.weekly_off, active: s.active, notes: s.notes, profileId: s.profile_id };
   const P = {}; for (const p of spay) P[p.staff_id] = Number(p.monthly_salary);
-  Object.assign(S, { members: M, attendance: A, equipment: E, targets: T, staff: SF, pay: P, staffAtt: satt, staffTargets: stg, payroll: prl, offers, memberOffers: moff, enquiries: enq, expenses: exp, requests: req, invitations: inv, profiles: prof });
+  Object.assign(S, { members: M, attendance: A, equipment: E, targets: T, staff: SF, pay: P, staffAtt: satt, staffTargets: stg, payroll: prl, offers, memberOffers: moff, enquiries: enq, expenses: exp, requests: req, invitations: inv, profiles: prof, themes: (themes || []).map(fromRow), themeCfg: configFromRow(tcfg) });
   if (st) S.settings = { gymName: st.gym_name, currency: st.currency, memberPrefix: st.member_prefix, employeePrefix: st.employee_prefix, registrationFee: Number(st.registration_fee), paidLeaves: Number(st.paid_leaves_per_month), offerWindow: Number(st.renewal_offer_window_days), reminder: st.reminder };
   if (view === 'member' && ui.memberId) await loadHistory(ui.memberId);
   loading = false; render();
@@ -237,7 +241,7 @@ let channel = null;
 function subscribeLive() {
   if (channel) supabase.removeChannel(channel);
   channel = supabase.channel('jfs-live');
-  for (const t of ['members', 'payments', 'attendance', 'member_offers', 'change_requests', 'staff', 'staff_pay', 'staff_attendance', 'staff_targets', 'payroll', 'targets', 'equipment', 'service_logs', 'expenses', 'offers', 'enquiries', 'settings', 'invitations', 'profiles'])
+  for (const t of ['members', 'payments', 'attendance', 'member_offers', 'change_requests', 'staff', 'staff_pay', 'staff_attendance', 'staff_targets', 'payroll', 'targets', 'equipment', 'service_logs', 'expenses', 'offers', 'enquiries', 'settings', 'invitations', 'profiles', 'site_themes', 'site_theme_config'])
     channel.on('postgres_changes', { event: '*', schema: 'public', table: t }, scheduleReload);
   channel.subscribe();
 }
@@ -741,9 +745,81 @@ function vTeam() {
 }
 
 /* ======================================================================
+   OWNER: website themes ("workout mixes")
+   ====================================================================== */
+const INTERVALS = [[15, '15 seconds'], [30, '30 seconds'], [40, '40 seconds'], [60, '1 minute'], [120, '2 minutes'], [300, '5 minutes'], [900, '15 minutes'], [3600, '1 hour']];
+const MODES = [['rotate', 'Rotate all'], ['daypart', 'Follow time of day'], ['pinned', 'Pin one mix']];
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let themeStage = null, themeCanvas = null;
+const allMixes = () => (S.themes.length ? S.themes : DEFAULT_MIXES.map((m, i) => ({ ...m, enabled: true, sort: i + 1, builtin: true }))).slice().sort((a, b) => a.sort - b.sort);
+function previewMix() { const all = allMixes(); return all.find(m => m.id === ui.mixPreview) || playlist(all, S.themeCfg || {})[0]; }
+function mountThemeStage() {
+  const c = document.getElementById('themeStage');
+  if (!c) { if (themeStage) { themeStage.destroy(); themeStage = null; themeCanvas = null; } return; }
+  if (c !== themeCanvas) { if (themeStage) themeStage.destroy(); themeCanvas = c; themeStage = createStage(c, { reduced: reducedMotion, maxDpr: 1 }); }
+  themeStage.setMix(previewMix());
+}
+const cover = m => `background:linear-gradient(135deg,${m.a} 0%,${m.c} 55%,${m.b} 100%)`;
+function vThemes() {
+  const all = allMixes(); const cfg = S.themeCfg || configFromRow(null); const live = playlist(all, cfg); const pm = previewMix();
+  const dp = daypartNow();
+  const liveNote = cfg.mode === 'pinned' ? `Pinned to <b>${esc(live[0].name)}</b>.` : cfg.mode === 'daypart' ? `It’s ${esc(DAYPARTS[dp].split(' (')[0].toLowerCase())} now, so the website plays ${live.map(m => `<b>${esc(m.name)}</b>`).join(', ')}.` : `Rotating ${live.length} mix${live.length === 1 ? '' : 'es'}, one every ${esc((INTERVALS.find(i => i[0] === cfg.intervalSec) || [0, cfg.intervalSec + ' seconds'])[1])}.`;
+  return header('Website themes', 'Workout mixes play behind your website, like playlists. Choose which ones play and how often they change, or create your own. Changes go live on the website straight away.', `<button class="btn primary" data-act="mixNew">New mix</button>`)
+    + `<div class="mix-hero"><section class="panel mix-stage-wrap"><canvas id="themeStage" aria-label="Preview of ${esc(pm.name)}"></canvas>
+        <div class="mix-stage-cap"><span class="mix-cover sm" style="${cover(pm)}"></span><div><small>${ui.mixPreview ? 'Previewing' : 'On the website now'}</small><b>${esc(pm.name)}</b><span>${pm.bpm} BPM · ${esc(MOTIONS[pm.motion].split(':')[0])}</span></div></div></section>
+      <section class="panel"><h2>Playback rules</h2><p class="meta" style="margin:0 0 14px">${liveNote}</p>
+        <label class="lbl">How the website picks a mix</label><div class="seg" role="group" aria-label="Mode">${MODES.map(([k, l]) => `<button data-act="mixMode" data-v="${k}" aria-pressed="${cfg.mode === k}">${l}</button>`).join('')}</div>
+        ${cfg.mode === 'pinned' ? `<label class="lbl" for="mixPinned">Pinned mix</label><select id="mixPinned" class="field-inline" data-act-change="mixPinned">${all.filter(m => m.enabled).map(m => `<option value="${esc(m.id)}" ${m.id === (cfg.pinned || live[0].id) ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>` : `<label class="lbl" for="mixInterval">Change every</label><select id="mixInterval" class="field-inline" data-act-change="mixInterval">${(INTERVALS.some(i => i[0] === cfg.intervalSec) ? INTERVALS : [...INTERVALS, [cfg.intervalSec, cfg.intervalSec + ' seconds']].sort((x, y) => x[0] - y[0])).map(([v, l]) => `<option value="${v}" ${v === cfg.intervalSec ? 'selected' : ''}>${l}</option>`).join('')}</select>`}
+        <label class="lbl" style="display:flex;gap:8px;align-items:center;margin-top:16px"><input type="checkbox" data-act-change="mixVisitor" ${cfg.visitorControls ? 'checked' : ''}> Let visitors skip and pause mixes</label>
+        <p class="meta">Visitors can always pause the moving background, because some people find motion distracting.</p></section></div>
+    <section class="panel"><div class="panel-head"><h2>Your mixes</h2><span class="meta">${all.filter(m => m.enabled).length} of ${all.length} playing</span></div>
+      <div class="mix-grid">${all.map((m, i) => { const r = readability(m); const isLive = live.some(x => x.id === m.id);
+        return `<article class="mix ${m.enabled ? '' : 'off'} ${pm.id === m.id ? 'sel' : ''}">
+          <button class="mix-cover" style="${cover(m)}" data-act="mixPreview" data-id="${esc(m.id)}" aria-label="Preview ${esc(m.name)}"><span class="mix-bars"><i></i><i></i><i></i></span><b>${esc(m.name)}</b>${isLive && m.enabled ? '<span class="mix-live">Playing</span>' : ''}</button>
+          <div class="mix-body"><div class="who">${esc(m.name)}</div><div class="meta">${esc(m.tagline || '')}</div>
+            <div class="mix-tags"><span class="chip neutral">${m.bpm} BPM</span><span class="chip neutral">${esc(MOTIONS[m.motion].split(':')[0])}</span><span class="chip neutral">${esc(DAYPARTS[m.daypart].split(' (')[0])}</span>${r.ok ? '' : '<span class="chip bad" title="Accent colour is hard to read on the dark page">Low contrast</span>'}</div>
+            <div class="row-actions"><label class="switch"><input type="checkbox" data-act-change="mixEnabled" data-id="${esc(m.id)}" ${m.enabled ? 'checked' : ''}><span>${m.enabled ? 'On' : 'Off'}</span></label>
+              <button class="btn sm" data-act="mixMove" data-id="${esc(m.id)}" data-v="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(m.name)} earlier">↑</button><button class="btn sm" data-act="mixMove" data-id="${esc(m.id)}" data-v="1" ${i === all.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(m.name)} later">↓</button>
+              <button class="btn sm" data-act="mixEdit" data-id="${esc(m.id)}">Edit</button>${m.builtin ? '' : `<button class="btn sm danger" data-act="mixDelete" data-id="${esc(m.id)}">Delete</button>`}</div></div></article>`; }).join('')}</div></section>`;
+}
+const slug = s => String(s).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'mix';
+function mixValues(form) { const v = formValues(form); return { id: 'draft', name: v.name || 'New mix', tagline: v.tagline || '', a: v.a, b: v.b, c: v.c, motion: v.motion, bpm: Math.min(200, Math.max(50, Number(v.bpm) || 120)), daypart: v.daypart, enabled: !!v.enabled }; }
+let modalStage = null;
+function updateMixPreview() {
+  const form = $('#modalForm'); const c = $('#mixPrev'); if (!form || !c) return;
+  if (!modalStage || modalStage.canvas !== c) { if (modalStage) modalStage.stage.destroy(); modalStage = { canvas: c, stage: createStage(c, { reduced: reducedMotion, maxDpr: 1 }) }; }
+  const m = mixValues(form); modalStage.stage.setMix({ ...m, id: m.a + m.b + m.c + m.motion + m.bpm }, { instant: true });
+  const r = readability(m);
+  $('#mixCheck').innerHTML = r.ok ? `<span class="chip good">Readable</span> <span class="meta">Accent contrast ${r.onPage.toFixed(1)}:1 on the page, ${r.onButton.toFixed(1)}:1 on buttons.</span>` : `<span class="chip bad">Too dark to read</span> <span class="meta">The accent colour needs at least 4.5:1 contrast (now ${Math.min(r.onPage, r.onButton).toFixed(1)}:1). Pick a lighter accent.</span>`;
+}
+function mixForm(id) {
+  const m = id ? allMixes().find(x => x.id === id) : { name: '', tagline: '', a: '#E8A272', b: '#B86B3C', c: '#FF7A33', motion: 'ember', bpm: 128, daypart: 'any', enabled: true };
+  if (!m) return;
+  openModal(id ? `Edit mix · ${m.name}` : 'New mix', `<canvas id="mixPrev" class="mix-prev" aria-hidden="true"></canvas><div id="mixCheck" style="margin:8px 0 4px"></div>` + fieldsHtml([
+    { k: 'name', label: 'Mix name', req: true, ph: 'e.g. Leg Day Thunder' }, { k: 'tagline', label: 'Tagline', ph: 'One short line, shown on the website' },
+    { sec: 'Colours' }, { k: 'a', label: 'Accent (buttons, highlights)', type: 'color' }, { k: 'b', label: 'Deep shade', type: 'color' }, { k: 'c', label: 'Glow', type: 'color' },
+    { sec: 'Feel' }, { k: 'motion', label: 'Motion', type: 'select', options: Object.entries(MOTIONS) }, { k: 'bpm', label: 'Tempo (BPM, 50–200)', type: 'number', hint: 'Higher tempo, faster motion' },
+    { k: 'daypart', label: 'Best time of day', type: 'select', options: Object.entries(DAYPARTS), hint: 'Used when the website follows the time of day' },
+    { k: 'enabled', label: 'Play this mix on the website', type: 'checkbox', full: true }], m), {
+    submitLabel: id ? 'Save mix' : 'Add mix',
+    submit: v => {
+      const mv = { name: (v.name || '').slice(0, 40), tagline: (v.tagline || '').slice(0, 90) || null, color_a: v.a, color_b: v.b, color_c: v.c, motion: v.motion, bpm: Math.min(200, Math.max(50, Number(v.bpm) || 120)), daypart: v.daypart, enabled: !!v.enabled };
+      if (!mv.name) return toast('Give the mix a name.');
+      const r = readability({ a: v.a }); if (!r.ok) { toast('That accent colour is too dark to read on the website. Pick a lighter accent.'); return mixForm(id); }
+      if (id) return mutate(() => q(supabase.from('site_themes').update(mv).eq('id', id)), 'Mix saved · live on the website');
+      const taken = new Set(allMixes().map(x => x.id)); let nid = slug(mv.name), n = 2; while (taken.has(nid)) nid = `${slug(mv.name).slice(0, 28)}-${n++}`;
+      const sort = Math.max(0, ...allMixes().map(x => x.sort || 0)) + 1;
+      return mutate(() => q(supabase.from('site_themes').insert({ id: nid, ...mv, sort, builtin: false })), 'Mix added · live on the website');
+    },
+  });
+  updateMixPreview();
+}
+const setThemeCfg = (patch, msg = 'Website updated') => mutate(() => q(supabase.from('site_theme_config').update(patch).eq('id', 1)), msg);
+
+/* ======================================================================
    OWNER: backup & restore (Excel)
    ====================================================================== */
-const BACKUP_TABLES = ['settings', 'members', 'payments', 'attendance', 'member_history', 'member_offers', 'staff', 'staff_pay', 'staff_attendance', 'staff_targets', 'payroll', 'targets', 'equipment', 'service_logs', 'expenses', 'offers', 'enquiries'];
+const BACKUP_TABLES = ['settings', 'members', 'payments', 'attendance', 'member_history', 'member_offers', 'staff', 'staff_pay', 'staff_attendance', 'staff_targets', 'payroll', 'targets', 'equipment', 'service_logs', 'expenses', 'offers', 'enquiries', 'site_themes'];
 const JSON_COLS = new Set(['changes', 'payload']);
 function vBackup() {
   const r = ui.restore;
@@ -820,7 +896,7 @@ async function restoreRun() {
   r.result = data.inserted; toast('Restore finished'); await loadAll();
 }
 
-const VIEW_FN = { backup: vBackup, overview: vOverview, approvals: vApprovals, me: vMe, clients: vClients, member: vMember, members: vMembers, attendance: vAttendance, renewals: vRenewals, enquiries: vEnquiries, offers: vOffers, finance: vFinance, payroll: vPayroll, staff: vStaff, targets: vTargets, equipment: vEquipment, team: vTeam };
+const VIEW_FN = { themes: vThemes, backup: vBackup, overview: vOverview, approvals: vApprovals, me: vMe, clients: vClients, member: vMember, members: vMembers, attendance: vAttendance, renewals: vRenewals, enquiries: vEnquiries, offers: vOffers, finance: vFinance, payroll: vPayroll, staff: vStaff, targets: vTargets, equipment: vEquipment, team: vTeam };
 
 /* ======================================================================
    App shell & auth screens
@@ -842,6 +918,7 @@ function renderApp() {
   const badges = { renewals: rb.due7.length, equipment: list('equipment').filter(e => eqState(e).cls === 'bad').length, enquiries: S.enquiries.filter(e => e.status === 'New').length, approvals: isOwner() ? pendingApprovals() : 0, team: S.profiles.filter(p => p.role === 'pending' && p.portal !== 'member').length };
   $('#nav').innerHTML = VIEWS.filter(([k]) => allowed(k)).map(([k, l]) => `<a href="#${k}" ${k === view || (view === 'member' && k === 'members') ? 'aria-current="page"' : ''}><span>${l}</span>${badges[k] ? `<span class="count">${badges[k]}</span>` : ''}</a>`).join('')
     + `<a href="#" data-act="settings" class="mobile-only"><span>Settings</span></a><a href="#" data-act="signOut" class="mobile-only"><span>Sign out</span></a>`;
+  mountThemeStage();
   document.body.classList.remove('authpage');
   $('#meName').textContent = me.full_name || me.email;
   const st = myStaff(); $('#meRole').innerHTML = `${esc(ROLE_LABEL[myRole()] || '')}${st ? ` · <span class="empcode">${esc(st.code)}</span>` : ''}`;
@@ -914,7 +991,7 @@ async function onSession(s) {
    Modal & forms
    ====================================================================== */
 let modalSubmit = null;
-function closeModal() { $('#modalRoot').innerHTML = ''; modalSubmit = null; }
+function closeModal() { $('#modalRoot').innerHTML = ''; modalSubmit = null; if (typeof modalStage !== 'undefined' && modalStage) { modalStage.stage.destroy(); modalStage = null; } }
 function openModal(title, body, { submit, submitLabel = 'Save', danger = false } = {}) {
   modalSubmit = submit || null;
   $('#modalRoot').innerHTML = `<div class="overlay" data-act="overlay"><form class="modal" id="modalForm" role="dialog" aria-modal="true" aria-label="${esc(title)}"><h2>${esc(title)}</h2>${body}
@@ -1209,6 +1286,12 @@ const ACT = {
   enqSource: d => { ui.enqSource = d.v; render(); },
   enqChat: d => { const e = S.enquiries.find(x => x.id === d.id); if (e) openModal(`Chat with ${e.name}`, `<div class="meta">${esc(new Date(e.created_at).toLocaleString())} · ${esc(e.phone)}</div><div class="transcript">${esc(e.transcript || '')}</div>`); },
   backupDownload: () => backupDownload(), restoreRun: () => restoreRun(), restoreCancel: () => { ui.restore = null; render(); },
+  mixNew: () => mixForm(), mixEdit: d => mixForm(d.id),
+  mixPreview: d => { ui.mixPreview = ui.mixPreview === d.id ? null : d.id; render(); },
+  mixMode: d => setThemeCfg(d.v === 'pinned' ? { mode: 'pinned', pinned: (S.themeCfg && S.themeCfg.pinned) || playlist(allMixes(), S.themeCfg || {})[0].id } : { mode: d.v }),
+  mixMove: d => { const all = allMixes(); const i = all.findIndex(m => m.id === d.id); const j = i + Number(d.v); if (i < 0 || j < 0 || j >= all.length) return; const [x, y] = [all[i], all[j]];
+    return mutate(async () => { await q(supabase.from('site_themes').update({ sort: j + 1 }).eq('id', x.id)); await q(supabase.from('site_themes').update({ sort: i + 1 }).eq('id', y.id)); }, 'Order updated'); },
+  mixDelete: d => { const m = allMixes().find(x => x.id === d.id); if (m) openModal('Delete mix?', `<p><b>${esc(m.name)}</b> will stop playing on the website and be removed.</p>`, { danger: true, submitLabel: 'Delete', submit: () => mutate(() => q(supabase.from('site_themes').delete().eq('id', d.id)), 'Mix deleted') }); },
   closeModal: () => closeModal(),
 };
 
@@ -1222,6 +1305,10 @@ document.addEventListener('change', e => {
   if (e.target.id === 'restoreFile' && e.target.files[0]) { restoreRead(e.target.files[0]); return; }
   const el = e.target; const a = el.dataset && el.dataset.actChange;
   if (a === 'viewAs') { ui.as = el.value; render(); return; }
+  if (a === 'mixEnabled') { const on = el.checked; if (!on && allMixes().filter(m => m.enabled).length <= 1) { el.checked = true; toast('Keep at least one mix playing.'); return; } mutate(() => q(supabase.from('site_themes').update({ enabled: on }).eq('id', el.dataset.id)), on ? 'Mix is playing on the website' : 'Mix taken off the website'); return; }
+  if (a === 'mixInterval') { setThemeCfg({ interval_sec: Number(el.value) }); return; }
+  if (a === 'mixPinned') { setThemeCfg({ pinned: el.value }, 'Pinned mix updated'); return; }
+  if (a === 'mixVisitor') { setThemeCfg({ visitor_controls: el.checked }); return; }
   if (a === 'enqStatus') { mutate(() => q(supabase.from('enquiries').update({ status: el.value }).eq('id', el.dataset.id)), 'Status updated'); return; }
   if (a === 'setRole') { mutate(() => q(supabase.from('profiles').update({ role: el.value, portal: 'staff' }).eq('id', el.dataset.id)), 'Role updated'); return; }
   if (a === 'setAccess') { mutate(() => q(supabase.from('profiles').update({ access_until: el.value || null, extension_requested_at: null }).eq('id', el.dataset.id)), el.value ? `Access until ${fmtDate(el.value)}` : 'Access has no end date'); return; }
@@ -1230,6 +1317,7 @@ document.addEventListener('change', e => {
 });
 document.addEventListener('input', e => {
   if (e.target.id === 'f_heightCm' || e.target.id === 'f_weightKg') updateBmi();
+  if ($('#mixPrev') && e.target.closest('#modalForm')) updateMixPreview();
   const k = e.target.dataset && e.target.dataset.bind; if (!k || e.target.type !== 'search') return; ui[k] = e.target.value; render();
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#modalRoot').innerHTML) closeModal(); });
