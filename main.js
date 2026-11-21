@@ -3,6 +3,8 @@ import { WEBSITE_URL } from './config.js';
 import { logoUrl, BRAND, MARK, LOCKUP, TAGLINE } from './brand.js';
 import { supabase, configured } from './supabase.js';
 import { MOTIONS, DAYPARTS, DEFAULT_MIXES, fromRow, configFromRow, playlist, createStage, readability, daypartNow } from './mixes.js';
+import { DEFAULT_CONTENT, contentFromRows, OFFER_KINDS, LOGO_VIDEOS, WEEK } from './content.js';
+import { mountReel } from './reel.js';
 import {
   esc, parse, today, nowTime, addDays, addMonths, diffDays, mKey, curMonth, shiftMonth,
   fmtDate, fmtShort, fmtMonth, fmtMonthS, barChart, pairChart, lineChart, dualChart, donut, gauge, heatmap, funnel, toCsv, download,
@@ -31,7 +33,8 @@ const VIEWS = [
   ['targets', 'Targets', MGR],
   ['equipment', 'Equipment', ALL],
   ['team', 'Logins & Access', OWN],
-  ['themes', 'Website themes', OWN],
+  ['content', 'Website content', MGR],
+  ['themes', 'Themes & visuals', MGR],
   ['backup', 'Backup & restore', OWN],
 ];
 const PLANS = { 'Monthly': 1, 'Quarterly': 3, 'Half-yearly': 6, 'Annual': 12 };
@@ -51,7 +54,7 @@ const PERSONAL = { name: 'name', phone: 'phone', email: 'email', heightCm: 'heig
 const DIRECT = { weightKg: 'weight_kg', trainerId: 'trainer_id', plan: 'plan', fee: 'fee', expiryDate: 'expiry_date', frozen: 'frozen', offer: 'offer' };
 const DEFAULT_SETTINGS = { gymName: BRAND, currency: '₹', memberPrefix: 'JFS', employeePrefix: 'JFS-E', registrationFee: 500, paidLeaves: 2, offerWindow: 30, reminder: 'Hi {name}, your {plan} membership at {gym} {when} on {date}. Renew at the front desk to keep training without a break!' };
 
-const S = { members: {}, attendance: {}, staff: {}, pay: {}, staffAtt: [], staffTargets: [], payroll: [], targets: {}, equipment: {}, offers: [], memberOffers: [], enquiries: [], expenses: [], requests: [], invitations: [], profiles: [], themes: [], themeCfg: null, settings: { ...DEFAULT_SETTINGS } };
+const S = { members: {}, attendance: {}, staff: {}, pay: {}, staffAtt: [], staffTargets: [], payroll: [], targets: {}, equipment: {}, offers: [], memberOffers: [], enquiries: [], expenses: [], requests: [], invitations: [], profiles: [], themes: [], themeCfg: null, content: contentFromRows([]), settings: { ...DEFAULT_SETTINGS } };
 const ui = { mixPreview: null, enqSource: 'all', restore: null, as: '', meMonth: null, clientSeg: 'all', enqFilter: 'open', memberId: null, history: null, historyFor: null, q: '', memberFilter: 'all', attDate: null, attQ: '', renewSeg: 'due7', payMonth: null, finMonth: null, tMonth: null, staffMonth: null, eqFilter: 'all', staffView: null };
 let session = null, me = null, view = 'overview', loading = true, recovery = false;
 
@@ -191,7 +194,7 @@ async function q(promise) { const { data, error } = await promise; if (error) th
 
 async function loadAll() {
   const since = addDays(today(), -400);
-  const [mem, pay, att, eq, logs, tg, st, staff, spay, satt, stg, prl, offers, moff, enq, exp, req, inv, prof, themes, tcfg] = await Promise.all([
+  const [mem, pay, att, eq, logs, tg, st, staff, spay, satt, stg, prl, offers, moff, enq, exp, req, inv, prof, themes, tcfg, content] = await Promise.all([
     q(supabase.from('members').select('*')),
     q(supabase.from('payments').select('*')),
     q(supabase.from('attendance').select('id,member_id,visit_date,visit_time').gte('visit_date', since).limit(100000)),
@@ -211,8 +214,9 @@ async function loadAll() {
     q(supabase.from('change_requests').select('*').order('created_at', { ascending: false }).limit(300)),
     isOwner() ? q(supabase.from('invitations').select('*').order('created_at', { ascending: false })) : [],
     isOwner() ? q(supabase.from('profiles').select('*').order('created_at')) : [],
-    isOwner() ? q(supabase.from('site_themes').select('*').order('sort')).catch(() => []) : [],
-    isOwner() ? q(supabase.from('site_theme_config').select('*').eq('id', 1).maybeSingle()).catch(() => null) : null,
+    q(supabase.from('site_themes').select('*').order('sort')).catch(() => []),
+    q(supabase.from('site_theme_config').select('*').eq('id', 1).maybeSingle()).catch(() => null),
+    q(supabase.from('site_content').select('key,value')).catch(() => []),
   ]);
   const M = {};
   for (const m of mem) M[m.id] = { code: m.member_code || '', name: m.name, phone: m.phone, email: m.email, heightCm: m.height_cm, weightKg: m.weight_kg, goal: m.goal, source: m.source, referredBy: m.referred_by, offer: m.offer, plan: m.plan, fee: Number(m.fee), joinDate: m.join_date, expiryDate: m.expiry_date, trainerId: m.trainer_id, broughtBy: m.brought_by, frozen: m.frozen, notes: m.notes, createdAt: m.created_at, payments: [] };
@@ -225,7 +229,7 @@ async function loadAll() {
   const T = {}; for (const t of tg) T[t.month] = { revenue: t.revenue, newMembers: t.new_members, renewals: t.renewals, checkins: t.checkins };
   const SF = {}; for (const s of staff) SF[s.id] = { code: s.employee_code || '', name: s.name, title: s.role, phone: s.phone, email: s.email, joinDate: s.join_date, shift: s.shift, weeklyOff: s.weekly_off, active: s.active, notes: s.notes, profileId: s.profile_id };
   const P = {}; for (const p of spay) P[p.staff_id] = Number(p.monthly_salary);
-  Object.assign(S, { members: M, attendance: A, equipment: E, targets: T, staff: SF, pay: P, staffAtt: satt, staffTargets: stg, payroll: prl, offers, memberOffers: moff, enquiries: enq, expenses: exp, requests: req, invitations: inv, profiles: prof, themes: (themes || []).map(fromRow), themeCfg: configFromRow(tcfg) });
+  Object.assign(S, { members: M, attendance: A, equipment: E, targets: T, staff: SF, pay: P, staffAtt: satt, staffTargets: stg, payroll: prl, offers, memberOffers: moff, enquiries: enq, expenses: exp, requests: req, invitations: inv, profiles: prof, themes: (themes || []).map(fromRow), themeCfg: configFromRow(tcfg), content: contentFromRows(content) });
   if (st) S.settings = { gymName: st.gym_name, currency: st.currency, memberPrefix: st.member_prefix, employeePrefix: st.employee_prefix, registrationFee: Number(st.registration_fee), paidLeaves: Number(st.paid_leaves_per_month), offerWindow: Number(st.renewal_offer_window_days), reminder: st.reminder };
   if (view === 'member' && ui.memberId) await loadHistory(ui.memberId);
   loading = false; render();
@@ -241,7 +245,7 @@ let channel = null;
 function subscribeLive() {
   if (channel) supabase.removeChannel(channel);
   channel = supabase.channel('jfs-live');
-  for (const t of ['members', 'payments', 'attendance', 'member_offers', 'change_requests', 'staff', 'staff_pay', 'staff_attendance', 'staff_targets', 'payroll', 'targets', 'equipment', 'service_logs', 'expenses', 'offers', 'enquiries', 'settings', 'invitations', 'profiles', 'site_themes', 'site_theme_config'])
+  for (const t of ['members', 'payments', 'attendance', 'member_offers', 'change_requests', 'staff', 'staff_pay', 'staff_attendance', 'staff_targets', 'payroll', 'targets', 'equipment', 'service_logs', 'expenses', 'offers', 'enquiries', 'settings', 'invitations', 'profiles', 'site_themes', 'site_theme_config', 'site_content'])
     channel.on('postgres_changes', { event: '*', schema: 'public', table: t }, scheduleReload);
   channel.subscribe();
 }
@@ -611,8 +615,8 @@ function offerState(o) { if (!o.active) return { label: 'Hidden', cls: 'neutral'
 function vOffers() {
   const os = S.offers; const personal = S.memberOffers.filter(o => o.status === 'active');
   return header('Offers', 'Website & member offers, plus personal renewal offers.', isManager() ? `<button class="btn primary" data-act="addOffer">Add offer</button>` : '')
-    + `<section class="panel"><h2>Website & member offers</h2><div class="tbl-wrap"><table><thead><tr><th>Offer</th><th>Badge</th><th>Shown to</th><th>Valid till</th><th>Status</th><th></th></tr></thead><tbody>
-    ${os.map(o => { const s = offerState(o); return `<tr><td><div class="who">${esc(o.title)}</div><div class="meta">${esc(o.details || '')}</div></td><td>${o.tag ? `<span class="chip neutral">${esc(o.tag)}</span>` : '—'}</td><td>${esc(AUD[o.audience] || o.audience)}</td><td>${esc(o.valid_until ? fmtDate(o.valid_until) : 'No end date')}</td><td><span class="chip ${s.cls}">${s.label}</span></td><td><div class="row-actions">${isManager() ? `<button class="btn sm" data-act="editOffer" data-id="${o.id}">Edit</button><button class="btn sm danger" data-act="delOffer" data-id="${o.id}">Delete</button>` : ''}</div></td></tr>`; }).join('')}
+    + `<section class="panel"><h2>Website & member offers</h2><div class="tbl-wrap"><table><thead><tr><th>Offer</th><th>Type</th><th>Badge</th><th>Shown to</th><th>Valid till</th><th>Status</th><th></th></tr></thead><tbody>
+    ${os.slice().sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0)).map(o => { const s = offerState(o); return `<tr><td><div class="who">${esc(o.title)}</div><div class="meta">${esc(o.highlight ? o.highlight + ' · ' : '')}${esc(o.details || '')}</div>${(o.price_rows || []).length ? `<div class="meta">${(o.price_rows || []).map(r => `${esc(r.label)}: ${r.was ? '<s>₹' + Number(r.was).toLocaleString('en-IN') + '</s> ' : ''}₹${Number(r.now).toLocaleString('en-IN')}`).join(' · ')}</div>` : ''}</td><td>${esc(OFFER_KINDS[o.kind || 'seasonal'] || o.kind)}</td><td>${o.tag ? `<span class="chip neutral">${esc(o.tag)}</span>` : '—'}</td><td>${esc(AUD[o.audience] || o.audience)}</td><td>${esc(o.valid_until ? fmtDate(o.valid_until) : 'No end date')}</td><td><span class="chip ${s.cls}">${s.label}</span></td><td><div class="row-actions">${isManager() ? `<button class="btn sm" data-act="editOffer" data-id="${o.id}">Edit</button><button class="btn sm danger" data-act="delOffer" data-id="${o.id}">Delete</button>` : ''}</div></td></tr>`; }).join('')}
     </tbody></table>${os.length ? '' : '<div class="empty">No offers yet.</div>'}</div></section>
     <section class="panel"><h2>Personal renewal offers (active)</h2>${personal.length ? `<div class="tbl-wrap"><table><thead><tr><th>Member</th><th>Offer</th><th>By</th><th>Valid till</th><th>Renewal date</th></tr></thead><tbody>${personal.map(o => { const m = S.members[o.member_id]; return m ? `<tr><td><a class="who" href="#member-${m.id}">${esc(m.name)}</a> <span class="mid">${esc(m.code)}</span></td><td>${esc(o.title)}<div class="meta">${esc(o.details || '')}</div></td><td>${esc(o.created_by_name || '')}</td><td>${esc(o.valid_until ? fmtDate(o.valid_until) : '—')}</td><td>${esc(fmtDate(m.expiryDate))}</td></tr>` : ''; }).join('')}</tbody></table></div>` : '<div class="empty">No personal offers right now. Add them from Renewals or a member’s profile.</div>'}</section>`;
 }
@@ -764,7 +768,7 @@ function vThemes() {
   const all = allMixes(); const cfg = S.themeCfg || configFromRow(null); const live = playlist(all, cfg); const pm = previewMix();
   const dp = daypartNow();
   const liveNote = cfg.mode === 'pinned' ? `Pinned to <b>${esc(live[0].name)}</b>.` : cfg.mode === 'daypart' ? `It’s ${esc(DAYPARTS[dp].split(' (')[0].toLowerCase())} now, so the website plays ${live.map(m => `<b>${esc(m.name)}</b>`).join(', ')}.` : `Rotating ${live.length} mix${live.length === 1 ? '' : 'es'}, one every ${esc((INTERVALS.find(i => i[0] === cfg.intervalSec) || [0, cfg.intervalSec + ' seconds'])[1])}.`;
-  return header('Website themes', 'Workout mixes play behind your website, like playlists. Choose which ones play and how often they change, or create your own. Changes go live on the website straight away.', `<button class="btn primary" data-act="mixNew">New mix</button>`)
+  return header('Themes & visuals', 'Workout themes play behind your website and colour the Employee Dashboard, like playlists. Choose which ones play, how often they change, and which logo animations rotate. Changes go live straight away.', `<button class="btn primary" data-act="mixNew">New theme</button>`)
     + `<div class="mix-hero"><section class="panel mix-stage-wrap"><canvas id="themeStage" aria-label="Preview of ${esc(pm.name)}"></canvas>
         <div class="mix-stage-cap"><span class="mix-cover sm" style="${cover(pm)}"></span><div><small>${ui.mixPreview ? 'Previewing' : 'On the website now'}</small><b>${esc(pm.name)}</b><span>${pm.bpm} BPM · ${esc(MOTIONS[pm.motion].split(':')[0])}</span></div></div></section>
       <section class="panel"><h2>Playback rules</h2><p class="meta" style="margin:0 0 14px">${liveNote}</p>
@@ -772,6 +776,7 @@ function vThemes() {
         ${cfg.mode === 'pinned' ? `<label class="lbl" for="mixPinned">Pinned mix</label><select id="mixPinned" class="field-inline" data-act-change="mixPinned">${all.filter(m => m.enabled).map(m => `<option value="${esc(m.id)}" ${m.id === (cfg.pinned || live[0].id) ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>` : `<label class="lbl" for="mixInterval">Change every</label><select id="mixInterval" class="field-inline" data-act-change="mixInterval">${(INTERVALS.some(i => i[0] === cfg.intervalSec) ? INTERVALS : [...INTERVALS, [cfg.intervalSec, cfg.intervalSec + ' seconds']].sort((x, y) => x[0] - y[0])).map(([v, l]) => `<option value="${v}" ${v === cfg.intervalSec ? 'selected' : ''}>${l}</option>`).join('')}</select>`}
         <label class="lbl" style="display:flex;gap:8px;align-items:center;margin-top:16px"><input type="checkbox" data-act-change="mixVisitor" ${cfg.visitorControls ? 'checked' : ''}> Let visitors skip and pause mixes</label>
         <p class="meta">Visitors can always pause the moving background, because some people find motion distracting.</p></section></div>
+    ${visualsPanels()}
     <section class="panel"><div class="panel-head"><h2>Your mixes</h2><span class="meta">${all.filter(m => m.enabled).length} of ${all.length} playing</span></div>
       <div class="mix-grid">${all.map((m, i) => { const r = readability(m); const isLive = live.some(x => x.id === m.id);
         return `<article class="mix ${m.enabled ? '' : 'off'} ${pm.id === m.id ? 'sel' : ''}">
@@ -815,6 +820,108 @@ function mixForm(id) {
   updateMixPreview();
 }
 const setThemeCfg = (patch, msg = 'Website updated') => mutate(() => q(supabase.from('site_theme_config').update(patch).eq('id', 1)), msg);
+
+/* ---------- dashboard theme (staff) ---------- */
+const DASH_MODES = [['follow', 'Same as website'], ['fixed', 'One theme for everyone'], ['personal', 'Each person picks'], ['off', 'Plain (no theme)']];
+let dashStage = null, dashSig = '';
+const dashKey = () => 'jarin-dash-mix-' + (me && me.id);
+function dashMix() {
+  const cfg = S.themeCfg || configFromRow(null); const all = allMixes().filter(m => m.enabled !== false);
+  const mode = cfg.dashboardMode || 'follow';
+  if (mode === 'off') return null;
+  if (mode === 'fixed') return all.find(m => m.id === cfg.dashboardTheme) || playlist(allMixes(), cfg)[0];
+  if (mode === 'personal') { let pick = null; try { pick = localStorage.getItem(dashKey()); } catch (e) { /* ignore */ } if (pick === 'none') return null; const f = all.find(m => m.id === pick); if (f) return f; }
+  return playlist(allMixes(), cfg)[0];
+}
+function applyDashTheme() {
+  const m = dashMix(); const r = document.documentElement;
+  const wrap = document.getElementById('myThemeWrap'); const cfg = S.themeCfg || configFromRow(null);
+  if (wrap) {
+    wrap.hidden = cfg.dashboardMode !== 'personal';
+    if (!wrap.hidden) { let pick = ''; try { pick = localStorage.getItem(dashKey()) || ''; } catch (e) { /* ignore */ } $('#myTheme').innerHTML = `<option value="">Same as website</option><option value="none" ${pick === 'none' ? 'selected' : ''}>Plain (no theme)</option>` + allMixes().filter(x => x.enabled !== false).map(x => `<option value="${esc(x.id)}" ${pick === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join(''); }
+  }
+  let c = document.getElementById('dashStage');
+  if (!m) { for (const k of ['--accent', '--accent-2', '--accent-soft']) r.style.removeProperty(k); if (c) c.hidden = true; if (dashStage) dashStage.pause(); dashSig = ''; return; }
+  r.style.setProperty('--accent', m.a); r.style.setProperty('--accent-2', m.b); r.style.setProperty('--accent-soft', `color-mix(in srgb, ${m.a} 16%, #0B0908)`);
+  if (!c) { c = document.createElement('canvas'); c.id = 'dashStage'; c.setAttribute('aria-hidden', 'true'); document.body.prepend(c); dashStage = createStage(c, { reduced: reducedMotion, maxDpr: 1 }); }
+  c.hidden = false; const sig = [m.id, m.a, m.b, m.c, m.motion, m.bpm].join('|');
+  if (sig !== dashSig) { dashSig = sig; dashStage.setMix(m); dashStage.play(); }
+}
+const reelCfg = () => S.content.logo_reel || DEFAULT_CONTENT.logo_reel;
+const saveContent = (key, value, msg = 'Website updated') => mutate(() => q(supabase.from('site_content').upsert({ key, value })), msg);
+function visualsPanels() {
+  const cfg = S.themeCfg || configFromRow(null); const all = allMixes().filter(m => m.enabled !== false); const rc = reelCfg(); const vids = rc.videos || [];
+  return `<div class="grid2">
+    <section class="panel"><h2>Employee dashboard theme</h2><p class="meta" style="margin:0 0 12px">The dashboard takes the theme’s colours and a calm moving background. Charts and buttons follow the theme.</p>
+      <div class="seg wrap" role="group" aria-label="Dashboard theme">${DASH_MODES.map(([k, l]) => `<button data-act="dashMode" data-v="${k}" aria-pressed="${(cfg.dashboardMode || 'follow') === k}">${l}</button>`).join('')}</div>
+      ${cfg.dashboardMode === 'fixed' ? `<label class="lbl" for="dashTheme">Theme for everyone</label><select id="dashTheme" class="field-inline" data-act-change="dashTheme">${all.map(m => `<option value="${esc(m.id)}" ${m.id === cfg.dashboardTheme ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>` : ''}
+      ${cfg.dashboardMode === 'personal' ? '<p class="meta">Each person chooses under “My theme” at the bottom of the menu. Their choice stays on their own device.</p>' : ''}</section>
+    <section class="panel"><h2>Logo animations</h2><p class="meta" style="margin:0 0 10px">Your animated logos play one after another in the website’s hero${rc.dashboard !== false ? ' and on the dashboard sign-in screen' : ''}.</p>
+      <label class="lbl" style="display:flex;gap:8px;align-items:center"><input type="checkbox" data-act-change="reelOn" ${rc.enabled !== false ? 'checked' : ''}> Show logo animations on the website</label>
+      <label class="lbl" style="display:flex;gap:8px;align-items:center;margin-top:6px"><input type="checkbox" data-act-change="reelDash" ${rc.dashboard !== false ? 'checked' : ''}> Also show on the dashboard sign-in screen</label>
+      <div class="reel-list">${vids.map((v, i) => `<div class="reel-item ${v.enabled === false ? 'off' : ''}"><button class="reel-thumb" data-act="reelPreview" data-id="${esc(v.id)}" aria-label="Play ${esc(v.name)}"><img src="/media/${esc(v.id)}.jpg" alt="" loading="lazy"></button>
+        <div><b>${esc(v.name || LOGO_VIDEOS[v.id] || v.id)}</b><div class="row-actions"><label class="switch"><input type="checkbox" data-act-change="reelVid" data-id="${esc(v.id)}" ${v.enabled !== false ? 'checked' : ''}><span>${v.enabled !== false ? 'On' : 'Off'}</span></label>
+        <button class="btn sm" data-act="reelMove" data-id="${esc(v.id)}" data-v="-1" ${i === 0 ? 'disabled' : ''} aria-label="Play ${esc(v.name)} earlier">↑</button><button class="btn sm" data-act="reelMove" data-id="${esc(v.id)}" data-v="1" ${i === vids.length - 1 ? 'disabled' : ''} aria-label="Play ${esc(v.name)} later">↓</button></div></div></div>`).join('')}</div></section></div>`;
+}
+
+/* ---------- WEBSITE CONTENT (owner + manager) ---------- */
+const lines = t => String(t || '').split('\n').map(x => x.trim()).filter(Boolean);
+const num = v => Number(String(v ?? '').replace(/[^\d.]/g, '')) || 0;
+const cm = n => '₹' + Number(n || 0).toLocaleString('en-IN');
+function contentCard(key, title, body, extra = '') {
+  return `<section class="panel ccard"><div class="panel-head"><h2>${esc(title)}</h2><div class="row-actions">${extra}<button class="btn sm" data-act="cEdit" data-k="${key}">Edit</button><button class="btn sm" data-act="cReset" data-k="${key}" title="Go back to the fee guide values">Reset</button></div></div>${body}</section>`;
+}
+function vContent() {
+  const c = S.content; const f = c.fees; const fmtT = t => { const [h, m] = String(t).split(':').map(Number); return `${((h + 11) % 12) + 1}:${String(m || 0).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`; };
+  return header('Website content', 'Everything visitors read about plans, prices and services. Changes appear on the website and in the chat assistant within seconds.', `<a class="btn" href="${WEBSITE_URL}" target="_blank" rel="noopener">View website</a>`)
+    + `<div class="grid2">`
+    + contentCard('fees', 'Fees', `<div class="kv"><span>Registration (one time)</span><b>${cm(f.registration)}</b><span>Personal trainer</span><b>${cm(f.ptMonthly)} / month</b><span>One-day trial pass</span><b>${f.trialPass ? cm(f.trialPass) : 'Free'}</b><span>Personal locker</span><b>${cm(f.locker)} / month</b><span>Top banner</span><b>${esc(f.banner || '—')}</b></div>`)
+    + contentCard('hours', 'Opening hours', `<div class="kv"><span>Open</span><b>${fmtT(c.hours.open)} – ${fmtT(c.hours.close)}</b><span>Closed on</span><b>${esc((c.hours.closed || []).join(', ') || 'Never')}</b><span>Note</span><b>${esc(c.hours.note || '—')}</b></div>`)
+    + `</div>`
+    + `<section class="panel"><div class="panel-head"><h2>Membership plans</h2><div class="row-actions"><button class="btn sm primary" data-act="planEdit">Add plan</button><button class="btn sm" data-act="cReset" data-k="plans">Reset</button></div></div>
+      <div class="tbl-wrap"><table><thead><tr><th>Plan</th><th class="num">Price</th><th class="num">Months</th><th class="num">Per month</th><th>Cult app</th><th>Badge</th><th>Status</th><th></th></tr></thead><tbody>
+      ${c.plans.map((p, i) => `<tr><td class="who">${esc(p.name)}</td><td class="num">${cm(p.price)}</td><td class="num">${p.months}</td><td class="num">${cm(Math.round(p.price / Math.max(1, p.months)))}</td><td>${p.cult ? '<span class="chip good">Included</span>' : '—'}</td><td>${p.popular ? '<span class="chip neutral">Most chosen</span>' : '—'}</td><td><span class="chip ${p.enabled !== false ? 'good' : 'neutral'}">${p.enabled !== false ? 'On website' : 'Hidden'}</span></td>
+        <td><div class="row-actions"><button class="btn sm" data-act="planMove" data-i="${i}" data-v="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button><button class="btn sm" data-act="planMove" data-i="${i}" data-v="1" ${i === c.plans.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button><button class="btn sm" data-act="planEdit" data-i="${i}">Edit</button><button class="btn sm danger" data-act="planDelete" data-i="${i}">Delete</button></div></td></tr>`).join('')}
+      </tbody></table></div><p class="meta">The registration fee is added on top of every plan. Plans with “Cult app” get the Cult app row in the benefits table.</p></section>`
+    + `<div class="grid2">`
+    + contentCard('facts', 'Hero facts (4)', `<div class="kv">${c.facts.map(x => `<span>${esc(x.value)}</span><b>${esc(x.label)}</b>`).join('')}</div><p class="meta">Shown once, under the headline. Other sections don’t repeat them.</p>`)
+    + contentCard('benefits', 'What you get', `<ul class="clist">${c.benefits.map(b => `<li>${esc(b.text)} <span class="chip ${b.who === 'all' ? 'neutral' : 'good'}">${b.who === 'all' ? 'Every plan' : 'Cult app plans'}</span></li>`).join('')}</ul>`)
+    + `</div>`
+    + `<section class="panel"><div class="panel-head"><h2>Go further: extra services</h2><div class="row-actions"><button class="btn sm primary" data-act="svcEdit">Add group</button><button class="btn sm" data-act="cReset" data-k="services">Reset</button></div></div>
+      <div class="svc-grid">${c.services.map((g, i) => `<div class="svc"><div class="panel-head"><b>${esc(g.title)}</b><div class="row-actions"><button class="btn sm" data-act="svcEdit" data-i="${i}">Edit</button><button class="btn sm danger" data-act="svcDelete" data-i="${i}">Delete</button></div></div><ul class="clist">${(g.items || []).map(([n, pr]) => `<li><span>${esc(n)}</span><b>${cm(pr)}</b></li>`).join('')}</ul>${g.note ? `<div class="meta">${esc(g.note)}</div>` : ''}</div>`).join('')}</div></section>`
+    + contentCard('terms', 'Good to know', `<ul class="clist">${c.terms.map(t => `<li>${esc(t)}</li>`).join('')}<li class="meta">${esc(f.gstNote)}</li></ul>`);
+}
+function contentForm(key) {
+  const c = S.content;
+  if (key === 'fees') return openModal('Fees', fieldsHtml([{ k: 'registration', label: 'One-time registration fee', type: 'number', req: true }, { k: 'ptMonthly', label: 'Personal trainer, per month', type: 'number' }, { k: 'trialPass', label: 'One-day trial pass (0 = free)', type: 'number' }, { k: 'locker', label: 'Personal locker, per month', type: 'number' }, { k: 'banner', label: 'Top banner on the website', full: true, hint: 'Leave empty to hide. e.g. Grand opening · December 2026' }, { k: 'gstNote', label: 'Tax note', full: true }], c.fees),
+    { submit: v => saveContent('fees', { registration: num(v.registration), ptMonthly: num(v.ptMonthly), trialPass: num(v.trialPass), locker: num(v.locker), banner: v.banner || '', gstNote: v.gstNote || '' }, 'Fees updated') });
+  if (key === 'hours') return openModal('Opening hours', fieldsHtml([{ k: 'open', label: 'Opens', type: 'time', req: true }, { k: 'close', label: 'Closes', type: 'time', req: true }, { sec: 'Closed on' }, ...WEEK.map(d => ({ k: 'closed_' + d, label: d, type: 'checkbox' })), { k: 'note', label: 'Note (optional)', full: true, ph: 'e.g. Closed on 26 January' }],
+    { open: c.hours.open, close: c.hours.close, note: c.hours.note, ...Object.fromEntries(WEEK.map(d => ['closed_' + d, (c.hours.closed || []).includes(d)])) }),
+    { submit: v => { if (!v.open || !v.close || v.close <= v.open) return toast('Closing time must be after opening time.'); return saveContent('hours', { open: v.open, close: v.close, closed: WEEK.filter(d => v['closed_' + d]), note: v.note || '' }, 'Opening hours updated'); } });
+  if (key === 'facts') return openModal('Hero facts', fieldsHtml(c.facts.slice(0, 4).concat(Array(4).fill({ value: '', label: '' })).slice(0, 4).flatMap((x, i) => [{ k: 'v' + i, label: `Fact ${i + 1}: big text`, def: x.value }, { k: 'l' + i, label: 'Small text', def: x.label }])),
+    { submit: v => saveContent('facts', [0, 1, 2, 3].map(i => ({ value: v['v' + i], label: v['l' + i] })).filter(x => x.value), 'Hero facts updated') });
+  if (key === 'benefits') return openModal('What you get', fieldsHtml([{ k: 'all', label: 'Included with every plan (one per line)', type: 'textarea', full: true }, { k: 'annual', label: 'Only with plans that include the Cult app (one per line)', type: 'textarea', full: true }],
+    { all: c.benefits.filter(b => b.who === 'all').map(b => b.text).join('\n'), annual: c.benefits.filter(b => b.who !== 'all').map(b => b.text).join('\n') }),
+    { submit: v => saveContent('benefits', [...lines(v.all).map(t => ({ text: t, who: 'all' })), ...lines(v.annual).map(t => ({ text: t, who: 'annual' }))], 'Benefits updated') });
+  if (key === 'terms') return openModal('Good to know', fieldsHtml([{ k: 'terms', label: 'Terms (one per line)', type: 'textarea', full: true, hint: 'The tax note from Fees is added automatically.' }], { terms: c.terms.join('\n') }), { submit: v => saveContent('terms', lines(v.terms), 'Terms updated') });
+}
+function planForm(i) {
+  const list = S.content.plans.slice(); const p = i == null ? { name: '', price: 0, months: 1, cult: false, popular: false, enabled: true } : list[i];
+  openModal(i == null ? 'Add plan' : `Edit plan · ${p.name}`, fieldsHtml([{ k: 'name', label: 'Plan name', req: true }, { k: 'price', label: 'Price (₹)', type: 'number', req: true }, { k: 'months', label: 'Length in months', type: 'number', req: true }, { k: 'cult', label: 'Includes the Cult app', type: 'checkbox', full: true }, { k: 'popular', label: 'Show “Most chosen” badge', type: 'checkbox', full: true }, { k: 'enabled', label: 'Show on the website', type: 'checkbox', full: true }], p), {
+    submit: v => { if (!v.name || !num(v.price) || !num(v.months)) return toast('Fill in the plan name, price and months.');
+      const row = { id: p.id || v.name.toLowerCase().replace(/[^a-z0-9]+/g, '-'), name: v.name, price: num(v.price), months: Math.max(1, Math.round(num(v.months))), cult: !!v.cult, popular: !!v.popular, enabled: !!v.enabled };
+      if (row.popular) list.forEach(x => { x.popular = false; });
+      if (i == null) list.push(row); else list[i] = row; return saveContent('plans', list, 'Plan saved'); },
+  });
+}
+function svcForm(i) {
+  const list = S.content.services.slice(); const g = i == null ? { title: '', note: '', items: [] } : list[i];
+  openModal(i == null ? 'Add service group' : `Edit · ${g.title}`, fieldsHtml([{ k: 'title', label: 'Group name', req: true, full: true }, { k: 'items', label: 'Items with prices, one per line', type: 'textarea', full: true, hint: 'Write: Item name | price   e.g.  Protein shake | 180' }, { k: 'note', label: 'Small print', full: true }], { title: g.title, note: g.note, items: (g.items || []).map(([n, pr]) => `${n} | ${pr}`).join('\n') }), {
+    submit: v => { if (!v.title) return toast('Give the group a name.'); const items = lines(v.items).map(l => { const k = l.lastIndexOf('|'); return k > 0 ? [l.slice(0, k).trim(), num(l.slice(k + 1))] : [l, 0]; }).filter(x => x[0]);
+      const row = { title: v.title, note: v.note || '', items }; if (i == null) list.push(row); else list[i] = row; return saveContent('services', list, 'Services updated'); },
+  });
+}
+
 
 /* ======================================================================
    OWNER: backup & restore (Excel)
@@ -896,7 +1003,7 @@ async function restoreRun() {
   r.result = data.inserted; toast('Restore finished'); await loadAll();
 }
 
-const VIEW_FN = { themes: vThemes, backup: vBackup, overview: vOverview, approvals: vApprovals, me: vMe, clients: vClients, member: vMember, members: vMembers, attendance: vAttendance, renewals: vRenewals, enquiries: vEnquiries, offers: vOffers, finance: vFinance, payroll: vPayroll, staff: vStaff, targets: vTargets, equipment: vEquipment, team: vTeam };
+const VIEW_FN = { content: vContent, themes: vThemes, backup: vBackup, overview: vOverview, approvals: vApprovals, me: vMe, clients: vClients, member: vMember, members: vMembers, attendance: vAttendance, renewals: vRenewals, enquiries: vEnquiries, offers: vOffers, finance: vFinance, payroll: vPayroll, staff: vStaff, targets: vTargets, equipment: vEquipment, team: vTeam };
 
 /* ======================================================================
    App shell & auth screens
@@ -906,7 +1013,7 @@ function renderApp() {
     root.innerHTML = `<div class="app"><aside class="rail">
       <a class="brand" href="#overview" style="text-decoration:none;color:inherit" aria-label="${BRAND} dashboard">${LOCKUP}</a>
       <nav class="views" id="nav" aria-label="Sections"></nav>
-      <div class="rail-foot"><div class="tagline">${TAGLINE}</div><div class="me"><b id="meName"></b><span id="meRole"></span></div>
+      <div class="rail-foot"><label class="mytheme" id="myThemeWrap" hidden><span>My theme</span><select id="myTheme" data-act-change="myTheme" aria-label="My dashboard theme"></select></label><div class="tagline">${TAGLINE}</div><div class="me"><b id="meName"></b><span id="meRole"></span></div>
         ${''}<button class="btn sm" data-act="settings">Gym settings</button><a class="btn sm" href="${WEBSITE_URL}" target="_blank" rel="noopener">View website</a><button class="btn sm" data-act="signOut">Sign out</button></div>
     </aside><main id="main"></main></div>`;
   }
@@ -918,7 +1025,7 @@ function renderApp() {
   const badges = { renewals: rb.due7.length, equipment: list('equipment').filter(e => eqState(e).cls === 'bad').length, enquiries: S.enquiries.filter(e => e.status === 'New').length, approvals: isOwner() ? pendingApprovals() : 0, team: S.profiles.filter(p => p.role === 'pending' && p.portal !== 'member').length };
   $('#nav').innerHTML = VIEWS.filter(([k]) => allowed(k)).map(([k, l]) => `<a href="#${k}" ${k === view || (view === 'member' && k === 'members') ? 'aria-current="page"' : ''}><span>${l}</span>${badges[k] ? `<span class="count">${badges[k]}</span>` : ''}</a>`).join('')
     + `<a href="#" data-act="settings" class="mobile-only"><span>Settings</span></a><a href="#" data-act="signOut" class="mobile-only"><span>Sign out</span></a>`;
-  mountThemeStage();
+  mountThemeStage(); applyDashTheme();
   document.body.classList.remove('authpage');
   $('#meName').textContent = me.full_name || me.email;
   const st = myStaff(); $('#meRole').innerHTML = `${esc(ROLE_LABEL[myRole()] || '')}${st ? ` · <span class="empcode">${esc(st.code)}</span>` : ''}`;
@@ -927,8 +1034,17 @@ function renderApp() {
 }
 function authCard(inner) {
   document.body.classList.add('authpage');
-  root.innerHTML = `<div class="auth"><div class="auth-card"><img class="auth-logo" src="${logoUrl}" alt="${BRAND} – ${TAGLINE}" width="1000" height="375"><div class="meta" style="font-size:13px;font-weight:600">Employee Dashboard</div>${inner}<a class="meta" href="${WEBSITE_URL}" style="text-decoration:none">Go to the JARIN website</a></div></div>`;
+  setTimeout(mountAuthReel, 0);
+  root.innerHTML = `<div class="auth"><div class="auth-card"><div class="auth-reel" id="authReel" aria-hidden="true"></div><img class="auth-logo" src="${logoUrl}" alt="${BRAND} – ${TAGLINE}" width="1000" height="375"><div class="meta" style="font-size:13px;font-weight:600">Employee Dashboard</div>${inner}<a class="meta" href="${WEBSITE_URL}" style="text-decoration:none">Go to the JARIN website</a></div></div>`;
+}let authReelCfg = null;
+function mountAuthReel() {
+  const el = document.getElementById('authReel'); if (!el) return;
+  const cfg = authReelCfg; const on = cfg && cfg.enabled !== false && cfg.dashboard !== false && (cfg.videos || []).some(v => v.enabled !== false);
+  el.hidden = !on; document.querySelector('.auth-card')?.classList.toggle('with-reel', !!on);
+  if (on) mountReel(el, cfg);
 }
+if (configured) supabase.from('site_content').select('value').eq('key', 'logo_reel').maybeSingle().then(({ data }) => { authReelCfg = data ? data.value : DEFAULT_CONTENT.logo_reel; mountAuthReel(); }, () => {});
+
 function renderLogin(mode = 'signin', msg = '') {
   const signup = mode === 'signup', forgot = mode === 'forgot';
   authCard(`<h2>${signup ? 'Create your account' : forgot ? 'Reset your password' : 'Employee sign in'}</h2>
@@ -1131,9 +1247,18 @@ function serviceForm(id) {
 }
 function eqHistory(id) { const e = S.equipment[id]; if (!e) return; const logs = e.logs.slice().sort((a, b) => b.date.localeCompare(a.date)); openModal(`${e.name} · service history`, logs.length ? `<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Work done</th><th>By</th><th class="num">Cost</th></tr></thead><tbody>${logs.map(l => `<tr><td>${esc(fmtDate(l.date))}</td><td>${esc(l.work)}</td><td>${esc(l.tech || '—')}</td><td class="num">${esc(money(l.cost))}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No services logged yet.</div>'); }
 function offerForm(id) {
-  const o = id ? S.offers.find(x => x.id === id) : { audience: 'both', active: true };
-  openModal(id ? 'Edit offer' : 'Add offer', fieldsHtml([{ k: 'title', label: 'Offer title', req: true, full: true }, { k: 'tag', label: 'Badge (short)', ph: 'e.g. 20% OFF' }, { k: 'validUntil', label: 'Valid till', type: 'date' }, { k: 'details', label: 'Details', type: 'textarea', full: true }, { k: 'audience', label: 'Show to', type: 'select', options: Object.entries(AUD), full: true }, { k: 'active', label: 'Live', type: 'checkbox', full: true }], { title: o.title, tag: o.tag, details: o.details, audience: o.audience, validUntil: o.valid_until, active: o.active }), {
-    submit: v => { const row = { title: v.title, tag: v.tag || null, details: v.details || null, audience: v.audience || 'both', valid_until: v.validUntil || null, active: !!v.active }; return mutate(() => id ? q(supabase.from('offers').update(row).eq('id', id)) : q(supabase.from('offers').insert(row)), id ? 'Offer updated' : 'Offer added'); },
+  const o = id ? S.offers.find(x => x.id === id) : { audience: 'both', active: true, kind: 'seasonal', price_rows: [], sort: (S.offers.length + 1) };
+  openModal(id ? 'Edit offer' : 'Add offer', fieldsHtml([{ k: 'title', label: 'Offer title', req: true, full: true }, { k: 'kind', label: 'Type', type: 'select', options: Object.entries(OFFER_KINDS) }, { k: 'tag', label: 'Badge (short)', ph: 'e.g. 35% OFF' },
+    { k: 'highlight', label: 'Highlight chip', ph: 'e.g. First 150 registrations' }, { k: 'sort', label: 'Order on the website', type: 'number' },
+    { k: 'startsOn', label: 'Starts on', type: 'date', hint: 'Shown as “Starts …” until then' }, { k: 'validUntil', label: 'Valid till', type: 'date' },
+    { k: 'rows', label: 'Prices (one per line)', type: 'textarea', full: true, hint: 'Write: Plan | old price | offer price   e.g.  12 months + Cult app | 18000 | 11700' },
+    { k: 'details', label: 'Details', type: 'textarea', full: true }, { k: 'audience', label: 'Show to', type: 'select', options: Object.entries(AUD), full: true }, { k: 'active', label: 'Live', type: 'checkbox', full: true }],
+    { title: o.title, tag: o.tag, details: o.details, audience: o.audience, validUntil: o.valid_until, active: o.active, kind: o.kind || 'seasonal', highlight: o.highlight, sort: o.sort ?? 0, startsOn: o.starts_on, rows: (o.price_rows || []).map(r => `${r.label} | ${r.was || ''} | ${r.now}`).join('\n') }), {
+    submit: v => {
+      const price_rows = String(v.rows || '').split('\n').map(l => l.split('|').map(x => x.trim())).filter(p => p[0] && p.length >= 2).map(p => p.length >= 3 ? { label: p[0], was: Number(p[1].replace(/[^\d.]/g, '')) || null, now: Number(p[2].replace(/[^\d.]/g, '')) || 0 } : { label: p[0], was: null, now: Number(p[1].replace(/[^\d.]/g, '')) || 0 });
+      const row = { title: v.title, tag: v.tag || null, details: v.details || null, audience: v.audience || 'both', valid_until: v.validUntil || null, active: !!v.active, kind: v.kind || 'seasonal', highlight: v.highlight || null, sort: Number(v.sort) || 0, starts_on: v.startsOn || null, price_rows };
+      if (row.starts_on && row.valid_until && row.valid_until < row.starts_on) return toast('“Valid till” must be after the start date.');
+      return mutate(() => id ? q(supabase.from('offers').update(row).eq('id', id)) : q(supabase.from('offers').insert(row)), id ? 'Offer updated' : 'Offer added'); },
   });
 }
 function expenseForm(id) {
@@ -1292,6 +1417,16 @@ const ACT = {
   mixMove: d => { const all = allMixes(); const i = all.findIndex(m => m.id === d.id); const j = i + Number(d.v); if (i < 0 || j < 0 || j >= all.length) return; const [x, y] = [all[i], all[j]];
     return mutate(async () => { await q(supabase.from('site_themes').update({ sort: j + 1 }).eq('id', x.id)); await q(supabase.from('site_themes').update({ sort: i + 1 }).eq('id', y.id)); }, 'Order updated'); },
   mixDelete: d => { const m = allMixes().find(x => x.id === d.id); if (m) openModal('Delete mix?', `<p><b>${esc(m.name)}</b> will stop playing on the website and be removed.</p>`, { danger: true, submitLabel: 'Delete', submit: () => mutate(() => q(supabase.from('site_themes').delete().eq('id', d.id)), 'Mix deleted') }); },
+  dashMode: d => setThemeCfg(d.v === 'fixed' ? { dashboard_mode: 'fixed', dashboard_theme: (S.themeCfg && S.themeCfg.dashboardTheme) || playlist(allMixes(), S.themeCfg || {})[0].id } : { dashboard_mode: d.v }, 'Dashboard theme updated'),
+  reelMove: d => { const rc = { ...reelCfg(), videos: reelCfg().videos.slice() }; const i = rc.videos.findIndex(v => v.id === d.id); const j = i + Number(d.v); if (i < 0 || j < 0 || j >= rc.videos.length) return; [rc.videos[i], rc.videos[j]] = [rc.videos[j], rc.videos[i]]; return saveContent('logo_reel', rc, 'Order updated'); },
+  reelPreview: d => openModal(LOGO_VIDEOS[d.id] || 'Logo animation', `<video class="reel-preview" src="/media/${esc(d.id)}.mp4" poster="/media/${esc(d.id)}.jpg" autoplay muted playsinline controls></video>`),
+  cEdit: d => contentForm(d.k),
+  cReset: d => openModal('Reset to the fee guide?', `<p>This replaces the current <b>${esc(d.k)}</b> on the website with the values from the JARIN fee guide.</p>`, { submitLabel: 'Reset', submit: () => saveContent(d.k, DEFAULT_CONTENT[d.k], 'Reset to the fee guide') }),
+  planEdit: d => planForm(d.i == null ? null : Number(d.i)),
+  planMove: d => { const l = S.content.plans.slice(); const i = Number(d.i), j = i + Number(d.v); if (j < 0 || j >= l.length) return; [l[i], l[j]] = [l[j], l[i]]; return saveContent('plans', l, 'Order updated'); },
+  planDelete: d => { const l = S.content.plans.slice(); const p = l[Number(d.i)]; if (!p) return; if (l.length <= 1) return toast('Keep at least one plan.'); openModal('Delete plan?', `<p><b>${esc(p.name)}</b> will be removed from the website. Existing members on this plan aren’t affected.</p>`, { danger: true, submitLabel: 'Delete', submit: () => { l.splice(Number(d.i), 1); return saveContent('plans', l, 'Plan deleted'); } }); },
+  svcEdit: d => svcForm(d.i == null ? null : Number(d.i)),
+  svcDelete: d => { const l = S.content.services.slice(); const g = l[Number(d.i)]; if (g) openModal('Delete group?', `<p><b>${esc(g.title)}</b> will be removed from the website.</p>`, { danger: true, submitLabel: 'Delete', submit: () => { l.splice(Number(d.i), 1); return saveContent('services', l, 'Group deleted'); } }); },
   closeModal: () => closeModal(),
 };
 
@@ -1306,6 +1441,10 @@ document.addEventListener('change', e => {
   const el = e.target; const a = el.dataset && el.dataset.actChange;
   if (a === 'viewAs') { ui.as = el.value; render(); return; }
   if (a === 'mixEnabled') { const on = el.checked; if (!on && allMixes().filter(m => m.enabled).length <= 1) { el.checked = true; toast('Keep at least one mix playing.'); return; } mutate(() => q(supabase.from('site_themes').update({ enabled: on }).eq('id', el.dataset.id)), on ? 'Mix is playing on the website' : 'Mix taken off the website'); return; }
+  if (a === 'myTheme') { try { if (el.value) localStorage.setItem(dashKey(), el.value); else localStorage.removeItem(dashKey()); } catch (e) { /* ignore */ } applyDashTheme(); toast('Your dashboard theme is saved on this device'); return; }
+  if (a === 'dashTheme') { setThemeCfg({ dashboard_theme: el.value }, 'Dashboard theme updated'); return; }
+  if (a === 'reelOn' || a === 'reelDash') { saveContent('logo_reel', { ...reelCfg(), [a === 'reelOn' ? 'enabled' : 'dashboard']: el.checked }, 'Logo animations updated'); return; }
+  if (a === 'reelVid') { const rc = reelCfg(); if (!el.checked && rc.videos.filter(v => v.enabled !== false).length <= 1) { el.checked = true; toast('Keep at least one animation on, or switch the reel off above.'); return; } saveContent('logo_reel', { ...rc, videos: rc.videos.map(v => v.id === el.dataset.id ? { ...v, enabled: el.checked } : v) }, el.checked ? 'Animation added to the reel' : 'Animation removed from the reel'); return; }
   if (a === 'mixInterval') { setThemeCfg({ interval_sec: Number(el.value) }); return; }
   if (a === 'mixPinned') { setThemeCfg({ pinned: el.value }, 'Pinned mix updated'); return; }
   if (a === 'mixVisitor') { setThemeCfg({ visitor_controls: el.checked }); return; }

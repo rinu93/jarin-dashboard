@@ -34,6 +34,14 @@ then invite staff from **Team & logins**. An owner who accepts another invitatio
 - **Restore**: drop a backup file, check the preview counts, confirm. Rows that already exist are skipped, never overwritten,
   and member / employee codes continue from the highest restored code. Restored members are credited to the Owner who restored them.
 
+## Website content, offers and themes (Owner and Manager)
+- **Website content:** plans, fees, benefits, extra services, opening hours, hero facts and terms shown on the website.
+  "Reset" goes back to the JARIN fee guide values.
+- **Offers:** type (seasonal, students, special packages, referral rewards), badge, highlight, start and end dates, and
+  price rows written as `Plan | old price | offer price`.
+- **Themes & visuals:** workout themes for the website background, the Employee Dashboard theme (same as website, one
+  theme for everyone, each person picks, or plain), and which logo animations rotate.
+
 ## Local development
 ```bash
 npm install

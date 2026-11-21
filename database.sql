@@ -590,7 +590,7 @@ language plpgsql security definer set search_path = public as $$
 declare
   t text; n int; cols text; counts jsonb := '{}'::jsonb;
   tables text[] := array['staff','staff_pay','staff_attendance','staff_targets','payroll','members','payments','attendance',
-                         'member_history','member_offers','targets','equipment','service_logs','expenses','offers','enquiries','site_themes'];
+                         'member_history','member_offers','targets','equipment','service_logs','expenses','offers','enquiries','site_themes','site_content'];
 begin
   if not public.is_owner() then return json_build_object('ok', false, 'reason', 'not_owner'); end if;
   perform set_config('jfs.restoring', 'on', true);
@@ -613,7 +613,11 @@ begin
     -- columns missing from older backups get their default value
     select string_agg(case when c.column_default is not null then format('coalesce(%I, %s)', c.column_name, c.column_default) else quote_ident(c.column_name) end, ', ' order by c.ordinal_position)
       into cols from information_schema.columns c where c.table_schema = 'public' and c.table_name = t;
-    execute format('insert into public.%I select %s from _r on conflict do nothing', t, cols);
+    if t = 'site_content' then
+      execute format('insert into public.%I select %s from _r on conflict (key) do update set value = excluded.value', t, cols);
+    else
+      execute format('insert into public.%I select %s from _r on conflict do nothing', t, cols);
+    end if;
     get diagnostics n = row_count;
     counts := counts || jsonb_build_object(t, n);
     drop table _r;
@@ -826,6 +830,80 @@ grant update on public.site_theme_config to authenticated;
 do $$ declare t text; begin
   if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
     foreach t in array array['site_themes','site_theme_config'] loop
+      if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t) then
+        execute format('alter publication supabase_realtime add table public.%I', t);
+      end if;
+    end loop;
+  end if;
+end $$;
+-- =========================== v5 · WEBSITE CONTENT, RICHER OFFERS, MORE THEMES ===========================
+-- Website content the owner and manager can edit from the Employee Dashboard → Website content.
+create table if not exists public.site_content (
+  key        text primary key check (key in ('facts','fees','plans','benefits','services','terms','hours','logo_reel')),
+  value      jsonb not null,
+  updated_at timestamptz not null default now(),
+  updated_by uuid default auth.uid()
+);
+alter table public.site_content enable row level security;
+drop policy if exists content_public_read on public.site_content;
+create policy content_public_read on public.site_content for select to anon, authenticated using (true);
+drop policy if exists content_manager_write on public.site_content;
+create policy content_manager_write on public.site_content for all to authenticated using (public.is_manager()) with check (public.is_manager());
+grant select on public.site_content to anon, authenticated;
+grant insert, update, delete on public.site_content to authenticated;
+drop trigger if exists stamp_site_content on public.site_content;
+create trigger stamp_site_content before insert or update on public.site_content for each row execute function public.stamp_theme();
+
+insert into public.site_content (key, value) values
+('facts', '[{"value":"2,000 sq ft","label":"Fully air-conditioned training floor"},{"value":"6 AM – 10:30 PM","label":"Open every day, 16.5 hours"},{"value":"Cult International","label":"Endurance equipment partner"},{"value":"3 trainers","label":"On the floor, including a female trainer"}]'),
+('fees', '{"registration":1500,"ptMonthly":6000,"trialPass":300,"locker":300,"gstNote":"Prices in Indian Rupees, exclusive of GST as applicable.","banner":"Grand opening · December 2026"}'),
+('plans', '[{"id":"monthly","name":"Monthly","price":1500,"months":1,"cult":false,"popular":false,"enabled":true},{"id":"half-yearly","name":"Half-yearly","price":9000,"months":6,"cult":false,"popular":false,"enabled":true},{"id":"annual","name":"Annual","price":18000,"months":12,"cult":true,"popular":true,"enabled":true}]'),
+('benefits', '[{"text":"Floor guidance from our trainers","who":"all"},{"text":"Locker room and changing rooms","who":"all"},{"text":"Clean bathrooms","who":"all"},{"text":"Refreshment stall","who":"all"},{"text":"Bodybuilding gallery and magazines","who":"all"},{"text":"Cult app access","who":"annual"}]'),
+('services', '[{"title":"Diet & supplements","note":"Plans built around your goal and routine.","items":[["First consultation",1000],["Monthly diet plan + follow-ups",1500],["Supplement guidance",500]]},{"title":"Physiotherapy","note":"Injury recovery and mobility care.","items":[["Assessment",800],["Single session",700],["6-session pack",3900]]},{"title":"Workout stall","note":"Items subject to availability.","items":[["Protein shake",180],["Gym towel",250],["Shaker bottle",350],["Resistance band",400],["Lifting gloves",500],["Jarin branded tee",600]]}]'),
+('terms', '["Memberships are personal and non-transferable; fees are paid in advance.","Offers cannot be combined. Special packages are approved by the studio manager."]'),
+('hours', '{"open":"06:00","close":"22:30","closed":[],"note":""}'),
+('logo_reel', '{"enabled":true,"dashboard":true,"videos":[{"id":"ember-aura","name":"Ember Aura","enabled":true},{"id":"iron-lock","name":"Iron Lock","enabled":true},{"id":"rep-pulse","name":"Rep Pulse","enabled":true}]}')
+on conflict (key) do nothing;
+
+-- Offers: kinds, start dates and price rows (was → now)
+alter table public.offers add column if not exists kind text not null default 'seasonal';
+alter table public.offers add column if not exists starts_on date;
+alter table public.offers add column if not exists price_rows jsonb not null default '[]'::jsonb;
+alter table public.offers add column if not exists highlight text;
+alter table public.offers add column if not exists sort int not null default 0;
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'offers_kind_check') then
+    alter table public.offers add constraint offers_kind_check check (kind in ('seasonal','student','special','referral'));
+  end if;
+end $$;
+
+-- Themes: new motion styles, owner AND manager may manage, dashboard theme settings
+alter table public.site_themes drop constraint if exists site_themes_motion_check;
+alter table public.site_themes add constraint site_themes_motion_check check (motion in ('ember','pulse','flow','grid','aurora','bolt','breath','aura'));
+alter table public.site_theme_config add column if not exists dashboard_mode text not null default 'follow';
+alter table public.site_theme_config add column if not exists dashboard_theme text references public.site_themes(id) on delete set null;
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'site_theme_config_dashboard_mode_check') then
+    alter table public.site_theme_config add constraint site_theme_config_dashboard_mode_check check (dashboard_mode in ('follow','fixed','personal','off'));
+  end if;
+end $$;
+drop policy if exists themes_public_read on public.site_themes;
+create policy themes_public_read on public.site_themes for select to anon, authenticated using (enabled or public.is_manager());
+drop policy if exists themes_owner_write on public.site_themes;
+drop policy if exists themes_manager_write on public.site_themes;
+create policy themes_manager_write on public.site_themes for all to authenticated using (public.is_manager()) with check (public.is_manager());
+drop policy if exists theme_config_write on public.site_theme_config;
+create policy theme_config_write on public.site_theme_config for update to authenticated using (public.is_manager()) with check (public.is_manager());
+insert into public.site_themes (id, name, tagline, color_a, color_b, color_c, motion, bpm, daypart, sort, builtin) values
+  ('hiit-blast',   'HIIT Blast',   'Forty seconds on, twenty off. Go.',  '#D4FF4F', '#6E8F00', '#FFE14D', 'bolt',   175, 'morning', 7,  true),
+  ('yoga-flow',    'Yoga Flow',    'Breathe in, lengthen, breathe out.', '#F3B6D8', '#8E5BA8', '#9EE6D8', 'breath',  56, 'morning', 8,  true),
+  ('silver-aura',  'Silver Aura',  'Calm mind. Instinct takes over.',    '#CFE3FF', '#6F86B8', '#F2F6FF', 'aura',    96, 'night',   9,  true),
+  ('golden-surge', 'Golden Surge', 'Power up past your limit.',          '#FFD54A', '#C7861A', '#FFF1A8', 'aura',   150, 'evening', 10, true)
+on conflict (id) do nothing;
+
+do $$ declare t text; begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    foreach t in array array['site_content'] loop
       if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t) then
         execute format('alter publication supabase_realtime add table public.%I', t);
       end if;
