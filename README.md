@@ -5,7 +5,7 @@ loss of pay, targets, expenses vs income, equipment, team logins, and Excel back
 Roles: Owner/Admin, Manager, Trainer, Receptionist.
 
 ## 1. Database (Supabase)
-`database.sql` is already applied to the Supabase project **JARIN Fitness Studio** (`ifrmtkzllqhhpvoahdwr`).
+`database.sql` is already applied to the Supabase project **JARIN GYM WEBSITE** (`yuvcjkdinbmjwfjwbxeb`), upgraded from v2.
 For a brand-new project, paste it into Supabase → SQL Editor and run it (safe to run again).
 
 In Supabase → Authentication → URL Configuration:
@@ -20,7 +20,7 @@ Import this repository (preset **Vite**) with:
 
 | Name | Value |
 |---|---|
-| `VITE_SUPABASE_URL` | `https://ifrmtkzllqhhpvoahdwr.supabase.co` |
+| `VITE_SUPABASE_URL` | `https://yuvcjkdinbmjwfjwbxeb.supabase.co` |
 | `VITE_SUPABASE_ANON_KEY` | the project's anon key |
 
 Set the website address in `config.js` (`WEBSITE_URL`).
