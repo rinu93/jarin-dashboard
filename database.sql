@@ -753,3 +753,10 @@ begin
     end loop;
   end if;
 end $$;
+
+-- Trigger functions run automatically; nobody needs to call them through the API.
+do $$ declare f text; begin
+  foreach f in array array['assign_employee_code()','assign_member_code()','handle_new_user()','log_member_change()','protect_member_details()','stamp_offer_author()','stamp_payment_author()','stamp_request_author()'] loop
+    execute format('revoke execute on function public.%s from public, anon, authenticated', f);
+  end loop;
+end $$;
